@@ -258,6 +258,18 @@ async function onTick(mid, bid, ask, previous) {
 
 async function cancelOrder(id) { if (id && connection) { try { await connection.cancelOrder(id); } catch (_) {} } }
 
+function startForegroundService() {
+  try {
+    if (window.AndroidBot?.startForegroundBot) window.AndroidBot.startForegroundBot();
+  } catch (_) {}
+}
+
+function stopForegroundService() {
+  try {
+    if (window.AndroidBot?.stopForegroundBot) window.AndroidBot.stopForegroundBot();
+  } catch (_) {}
+}
+
 function saveCredentials() {
   const token = cleanToken(ui.token.value);
   const accountId = ui.account.value.trim();
@@ -273,6 +285,7 @@ function saveCredentials() {
 
 function changeCredentials() {
   trading = false;
+  stopForegroundService();
   localStorage.removeItem('metaapi.token'); localStorage.removeItem('metaapi.accountId');
   if (connection) connection.close().catch(() => {});
   if (api) api.close().catch(() => {});
@@ -283,9 +296,14 @@ function changeCredentials() {
 
 function startBot() {
   if (!connection || !synchronized) { setStatus('Connect MetaApi first'); return; }
+  startForegroundService();
   trading = true; setStatus('BOT RUNNING — waiting for tick movement');
 }
-function stopBot() { trading = false; setStatus('BOT STOPPED'); }
+function stopBot() {
+  trading = false;
+  stopForegroundService();
+  setStatus('BOT STOPPED');
+}
 
 ui.save.onclick = saveCredentials;
 ui.change.onclick = changeCredentials;
