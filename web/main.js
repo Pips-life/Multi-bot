@@ -18,6 +18,7 @@ let api = null, account = null, connection = null, listener = null;
 let trading = false, connecting = false, synchronized = false;
 let lastMid = NaN, currentPosition = null, currentStop = null;
 let entryInFlight = false, stopActionInFlight = false, lastStatus = '';
+const closingPositionIds = new Set();
 
 function setStatus(text) { if (text !== lastStatus) { lastStatus = text; ui.status.textContent = text; } }
 function fmt(n) { return Number.isFinite(n) ? Number(n).toFixed(2) : '—'; }
@@ -33,6 +34,16 @@ function isOurs(x) {
 }
 function idOf(x) { return String(x?.id ?? x?.positionId ?? x?.orderId ?? ''); }
 function volumeOf(x) { return Number(x?.volume ?? 0); }
+function positionTime(x) {
+  const t = Date.parse(String(x?.time ?? x?.updateTime ?? ''));
+  return Number.isFinite(t) ? t : 0;
+}
+function newestPosition(positions) {
+  return [...positions].sort((a, b) => {
+    const dt = positionTime(b) - positionTime(a);
+    return dt || idOf(b).localeCompare(idOf(a));
+  })[0] || null;
+}
 
 function normalizeVolume(raw, spec) {
   const min = Number(spec?.minVolume ?? 0.01);
@@ -145,14 +156,36 @@ async function connectSdk() {
   } finally { connecting = false; }
 }
 
+async function closePreviousPositions(positions, active) {
+  const activeId = idOf(active);
+  const previous = positions.filter(p => idOf(p) && idOf(p) !== activeId && !closingPositionIds.has(idOf(p)));
+  if (!previous.length || !connection) return;
+  for (const position of previous) {
+    const positionId = idOf(position);
+    closingPositionIds.add(positionId);
+    try {
+      await connection.closePosition(positionId);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      if (!/not found|does not exist|position.*closed/i.test(msg)) setStatus(`Closing previous position failed: ${msg}`);
+    } finally {
+      closingPositionIds.delete(positionId);
+    }
+  }
+}
+
 function reconcile() {
   if (!connection?.terminalState) return;
   const state = connection.terminalState;
   const positions = (state.positions || []).filter(isOurs);
   const orders = (state.orders || []).filter(isOurs);
-  const next = positions[0] || null;
   const old = currentPosition;
+  // If the opposite STOP has triggered before the old position-removal event
+  // arrives, both positions can briefly exist. Keep the newest position and
+  // immediately close every older Multi-bot position.
+  const next = positions.length > 1 ? newestPosition(positions) : (positions[0] || null);
   if (old && next && idOf(old) !== idOf(next) && sideOf(old) !== sideOf(next)) void handleReversal(old, next);
+  if (positions.length > 1 && next) void closePreviousPositions(positions, next);
   currentPosition = next;
   const stops = orders.filter(o => String(o.type ?? '').toUpperCase().includes('STOP'));
   const expected = next ? opposite(sideOf(next)) : '';
@@ -161,18 +194,27 @@ function reconcile() {
   ui.position.textContent = next ? sideOf(next) : '—';
   const stopPrice = Number(currentStop?.openPrice ?? currentStop?.currentPrice ?? 0);
   ui.stop.textContent = stopPrice > 0 ? fmt(stopPrice) : '—';
+  // Only one opposite STOP belongs to the active position. Remove stale
+  // pending stops so an old trigger cannot leave a second trade unmanaged.
+  for (const o of stops) if (!matching || idOf(o) !== idOf(matching)) void cancelOrder(idOf(o));
   if (next && !currentStop && !stopActionInFlight) void placeOppositeStop(next);
   if (!next && stops.length) for (const o of stops) void cancelOrder(idOf(o));
 }
 
 async function handleReversal(oldPosition, newPosition) {
   if (idOf(oldPosition) === idOf(newPosition)) return;
+  const oldId = idOf(oldPosition);
+  if (oldId && closingPositionIds.has(oldId)) return;
   try {
-    if (connection && connection.terminalState.positions.some(p => idOf(p) === idOf(oldPosition)))
-      await connection.closePosition(idOf(oldPosition));
+    if (oldId && connection && connection.terminalState.positions.some(p => idOf(p) === oldId)) {
+      closingPositionIds.add(oldId);
+      await connection.closePosition(oldId);
+    }
   } catch (e) {
     const msg = String(e?.message || e);
     if (!/not found|does not exist|position.*closed/i.test(msg)) setStatus(`Closing previous position failed: ${msg}`);
+  } finally {
+    if (oldId) closingPositionIds.delete(oldId);
   }
   currentPosition = newPosition;
   currentStop = null;
