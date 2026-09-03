@@ -15,6 +15,10 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Apply trading reversal fix
+        run: |
+          python3 .github/scripts/fix_reversal.py
+
       - name: Build MetaApi browser bundle
         run: |
           npm install
@@ -51,18 +55,28 @@ jobs:
           cp "$APK" release-apk/app-release-unsigned.apk
           ls -lh release-apk/app-release-unsigned.apk
 
-      - name: Create stable signing key
+      - name: Restore persistent release signing key
+        uses: actions/cache@v4
+        with:
+          path: release-apk/pips-life-release.jks
+          key: pips-life-release-signing-v1
+
+      - name: Create release signing key if missing
         run: |
           set -e
-          keytool -genkeypair -v \
-            -keystore release-apk/pips-life-release.jks \
-            -storepass pipslife-release \
-            -keypass pipslife-release \
-            -alias pipslife \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname 'CN=Pips-life, OU=Multi-bot, O=Pips-life, L=Kenya, C=KE'
+          if [ ! -f release-apk/pips-life-release.jks ]; then
+            keytool -genkeypair -v \
+              -keystore release-apk/pips-life-release.jks \
+              -storepass pipslife-release \
+              -keypass pipslife-release \
+              -alias pipslife \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname 'CN=Pips-life, OU=Multi-bot, O=Pips-life, L=Kenya, C=KE'
+          else
+            echo 'Reusing persistent Pips-life release signing key'
+          fi
 
       - name: Sign RELEASE APK
         run: |
