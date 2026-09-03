@@ -2,7 +2,7 @@ import MetaApi, { SynchronizationListener } from 'metaapi.cloud-sdk';
 
 const SYMBOL = 'XAUUSD';
 const MAGIC = 260903;
-const TRAIL_PIPS = 100;
+const TRAIL_PIPS = 70;
 const EXECUTION_VOLUME = 0.01;
 const XAUUSD_PIP_SIZE_FALLBACK = 0.01;
 
@@ -15,8 +15,9 @@ const ui = {
 
 let api = null, account = null, connection = null, listener = null;
 let trading = false, connecting = false, synchronized = false;
-let lastMid = NaN, currentPosition = null, currentStop = null;
-let entryInFlight = false, stopActionInFlight = false, lastStatus = '';
+let lastMid = NaN, lastBid = NaN, lastAsk = NaN, previousMid = NaN;
+let currentPosition = null, currentStop = null;
+let entryInFlight = false, stopActionInFlight = false, reentryScheduled = false, lastStatus = '';
 const eventLog = [];
 const sessionHistory = [];
 
@@ -47,8 +48,7 @@ function brokerPipSize() { const spec=connection?.terminalState?.specification(S
 function brokerDigits() { const spec=connection?.terminalState?.specification(SYMBOL); const d=Number(spec?.digits??2); return Number.isFinite(d)?d:2; }
 function normalizePrice(price) { return Number(Number(price).toFixed(brokerDigits())); }
 function currentVolume() { const spec=connection?.terminalState?.specification(SYMBOL); return normalizeVolume(EXECUTION_VOLUME,spec||{minVolume:.01,maxVolume:100,volumeStep:.01}); }
-function opposite(side) { return side==='BUY'?'SELL':'BUY'; }
-function stopCandidate(side,mid,pipSize) { return normalizePrice(side==='BUY'?mid-TRAIL_PIPS*pipSize:mid+TRAIL_PIPS*pipSize); }
+function stopCandidate(side,spot,pipSize) { return normalizePrice(side==='BUY' ? spot-TRAIL_PIPS*pipSize : spot+TRAIL_PIPS*pipSize); }
 function cleanToken(value) { return String(value??'').trim().replace(/^Bearer\s+/i,''); }
 function validAccountId(value) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value); }
 function sdkConstructor() { const Ctor=MetaApi?.default??MetaApi; if(typeof Ctor!=='function')throw new Error('MetaApi browser SDK constructor is unavailable'); return Ctor; }
@@ -61,14 +61,18 @@ class BotListener extends SynchronizationListener {
   onSymbolPricesUpdated(instanceIndex,prices){
     const p=Array.isArray(prices)?prices.find(x=>x?.symbol===SYMBOL):(prices?.symbol===SYMBOL?prices:null); if(!p)return;
     const bid=Number(p.bid),ask=Number(p.ask); if(!Number.isFinite(bid)||!Number.isFinite(ask))return;
-    const mid=(bid+ask)/2,previous=lastMid; lastMid=mid; ui.price.textContent=fmt(mid);
+    const mid=(bid+ask)/2; previousMid=lastMid; lastMid=mid; lastBid=bid; lastAsk=ask; ui.price.textContent=fmt(mid);
     const info=connection?.terminalState?.accountInformation; if(info?.balance!=null)ui.balance.textContent=fmt(Number(info.balance));
-    renderPageData(); if(!trading||!synchronized)return; void onTick(mid,bid,ask,previous);
+    renderPageData(); if(!trading||!synchronized)return; void onTick(mid,bid,ask);
   }
   onPositionUpdated(instanceIndex,position){ if(position?.symbol===SYMBOL)reconcile(); }
-  onPositionRemoved(){ reconcile(); }
+  onPositionRemoved(){
+    const hadPosition=!!currentPosition;
+    currentPosition=null; currentStop=null; reconcile();
+    if(hadPosition&&trading&&synchronized) scheduleReentry('STOP/position close detected');
+  }
   onOrderUpdated(instanceIndex,order){ if(order?.symbol===SYMBOL)reconcile(); }
-  onOrderCompleted(){ reconcile(); }
+  onOrderCompleted(instanceIndex,order){ if(order?.symbol===SYMBOL)reconcile(); }
   onOrderFailed(instanceIndex,orderId,error){ setStatus(`Order failed: ${error?.message||error}`); reconcile(); }
 }
 
@@ -94,48 +98,119 @@ async function connectSdk(){
 
 function reconcile(){
   if(!connection?.terminalState)return;
-  const state=connection.terminalState,positions=(state.positions||[]).filter(isOurs),orders=(state.orders||[]).filter(isOurs),next=positions[0]||null,old=currentPosition;
-  if(old&&next&&idOf(old)!==idOf(next)&&sideOf(old)!==sideOf(next))void handleReversal(old,next);
+  const state=connection.terminalState;
+  const positions=(state.positions||[]).filter(isOurs);
+  const legacyStops=(state.orders||[]).filter(isOurs).filter(o=>String(o.type??'').toUpperCase().includes('STOP'));
+  // This version uses a broker-side position SL, not an opposite pending stop.
+  // Cancel any old Pips-life pending stops left by a previous app version.
+  for(const o of legacyStops)void cancelOrder(idOf(o));
+
+  const next=positions[0]||null;
   currentPosition=next;
-  const stops=orders.filter(o=>String(o.type??'').toUpperCase().includes('STOP')),expected=next?opposite(sideOf(next)):'';
-  currentStop=stops.find(o=>sideOf(o)===expected)||null;
+  const stopPrice=Number(next?.stopLoss??0);
+  currentStop=next?{id:idOf(next),openPrice:stopPrice}:null;
   ui.position.textContent=next?sideOf(next):'—';
-  const stopPrice=Number(currentStop?.openPrice??currentStop?.currentPrice??0); ui.stop.textContent=stopPrice>0?fmt(stopPrice):'—';
+  ui.stop.textContent=stopPrice>0?fmt(stopPrice):'—';
   renderPageData();
-  if(next&&!currentStop&&!stopActionInFlight)void placeOppositeStop(next);
-  if(!next&&stops.length)for(const o of stops)void cancelOrder(idOf(o));
+
+  if(next && (!Number.isFinite(stopPrice)||stopPrice<=0) && !stopActionInFlight) void setInitialStop(next);
+  if(!next && trading && synchronized) scheduleReentry('No active position');
 }
 
-async function handleReversal(oldPosition,newPosition){
-  if(idOf(oldPosition)===idOf(newPosition))return;
-  try{if(connection&&connection.terminalState.positions.some(p=>idOf(p)===idOf(oldPosition)))await connection.closePosition(idOf(oldPosition));}
-  catch(e){const msg=String(e?.message||e);if(!/not found|does not exist|position.*closed/i.test(msg))setStatus(`Closing previous position failed: ${msg}`);}
-  currentPosition=newPosition;currentStop=null;await placeOppositeStop(newPosition);
-}
 function tradeOptions(comment){return{comment,magic:MAGIC};}
 
-async function enter(side){
-  if(entryInFlight||currentPosition)return; const volume=currentVolume(); if(volume<=0){setStatus('Cannot size trade: invalid XAUUSD execution volume');return;}
+async function enter(side,spot){
+  if(entryInFlight||currentPosition||!connection)return;
+  const volume=currentVolume();
+  if(volume<=0){setStatus('Cannot size trade: invalid XAUUSD execution volume');return;}
+  const pipSize=brokerPipSize();
+  const initialStop=stopCandidate(side,Number(spot),pipSize);
+  if(!Number.isFinite(initialStop)||initialStop<=0){setStatus('Cannot calculate 70-pip stop');return;}
   entryInFlight=true;
   try{
-    const options=tradeOptions('MB Velocity'); if(side==='BUY')await connection.createMarketBuyOrder(SYMBOL,volume,undefined,undefined,options); else await connection.createMarketSellOrder(SYMBOL,volume,undefined,undefined,options);
-    setStatus(`OPEN ${side} ${volume} — installing opposite STOP…`); await waitForPosition(side,5000); reconcile(); if(currentPosition)await placeOppositeStop(currentPosition);
+    const options=tradeOptions('MB Velocity 70pip Trail');
+    if(side==='BUY') await connection.createMarketBuyOrder(SYMBOL,volume,initialStop,undefined,options);
+    else await connection.createMarketSellOrder(SYMBOL,volume,initialStop,undefined,options);
+    setStatus(`OPEN ${side} ${volume} — SL ${fmt(initialStop)} (70 pips)`);
+    await waitForPosition(side,3000);
+    reconcile();
+    if(currentPosition) await setInitialStop(currentPosition);
   }catch(e){setStatus(`Entry failed: ${e?.message||e}`);}finally{entryInFlight=false;}
 }
-async function waitForPosition(side,timeoutMs){const end=Date.now()+timeoutMs;while(Date.now()<end){reconcile();if(currentPosition&&sideOf(currentPosition)===side)return currentPosition;await new Promise(r=>setTimeout(r,100));}return currentPosition;}
-async function placeOppositeStop(position){
-  if(!position||stopActionInFlight)return;stopActionInFlight=true;
-  try{const price=stopCandidate(sideOf(position),Number(position.openPrice),brokerPipSize()),volume=volumeOf(position)||currentVolume();if(!volume||!Number.isFinite(price)||price<=0)return;const options=tradeOptions('MB 100pip STOP');if(sideOf(position)==='BUY')await connection.createStopSellOrder(SYMBOL,volume,price,undefined,undefined,options);else await connection.createStopBuyOrder(SYMBOL,volume,price,undefined,undefined,options);reconcile();}
-  catch(e){setStatus(`STOP placement failed: ${e?.message||e}`);}finally{stopActionInFlight=false;}
+
+async function waitForPosition(side,timeoutMs){
+  const end=Date.now()+timeoutMs;
+  while(Date.now()<end){
+    reconcile();
+    if(currentPosition&&sideOf(currentPosition)===side)return currentPosition;
+    await new Promise(r=>setTimeout(r,50));
+  }
+  return currentPosition;
 }
-async function trail(mid){
-  if(!currentPosition||!currentStop||stopActionInFlight)return;const candidate=stopCandidate(sideOf(currentPosition),mid,brokerPipSize()),existing=Number(currentStop.openPrice??currentStop.currentPrice??0),improve=sideOf(currentPosition)==='BUY'?candidate>existing:candidate<existing;if(!improve)return;
-  stopActionInFlight=true;try{await connection.modifyOrder(idOf(currentStop),candidate,undefined,undefined);if(currentStop)currentStop.openPrice=candidate;}catch(e){setStatus(`STOP trail failed: ${e?.message||e}`);}finally{stopActionInFlight=false;}
+
+async function setInitialStop(position){
+  if(!position||stopActionInFlight||!connection)return;
+  const side=sideOf(position),spot=side==='BUY'?Number(lastBid):Number(lastAsk);
+  if(!Number.isFinite(spot))return;
+  const candidate=stopCandidate(side,spot,brokerPipSize());
+  if(!Number.isFinite(candidate)||candidate<=0)return;
+  stopActionInFlight=true;
+  try{
+    await connection.modifyPosition(idOf(position),candidate,undefined);
+    currentStop={id:idOf(position),openPrice:candidate};
+    ui.stop.textContent=fmt(candidate);
+  }catch(e){setStatus(`Initial SL failed: ${e?.message||e}`);}finally{stopActionInFlight=false;}
 }
-async function onTick(mid,bid,ask,previous){
-  reconcile(); if(!currentPosition){if(entryInFlight||Number.isNaN(previous)){if(Number.isNaN(previous))setStatus('Streaming XAUUSD — waiting for first movement');return;}if(previous<mid)await enter('BUY');else if(previous>mid)await enter('SELL');return;}
-  await trail(mid);setStatus(`Running ${sideOf(currentPosition)} | STOP ${fmt(Number(currentStop?.openPrice??currentStop?.currentPrice??0))}`);
+
+async function trail(bid,ask){
+  if(!currentPosition||stopActionInFlight)return;
+  const side=sideOf(currentPosition),spot=side==='BUY'?bid:ask;
+  const candidate=stopCandidate(side,spot,brokerPipSize());
+  const existing=Number(currentPosition.stopLoss??currentStop?.openPrice??0);
+  const improve=side==='BUY'?candidate>existing:candidate<existing;
+  if(existing>0&&!improve)return;
+  if(!Number.isFinite(candidate)||candidate<=0)return;
+  stopActionInFlight=true;
+  try{
+    await connection.modifyPosition(idOf(currentPosition),candidate,undefined);
+    currentPosition.stopLoss=candidate;
+    currentStop={id:idOf(currentPosition),openPrice:candidate};
+    ui.stop.textContent=fmt(candidate);
+  }catch(e){setStatus(`SL trail failed: ${e?.message||e}`);}finally{stopActionInFlight=false;}
 }
+
+function scheduleReentry(reason){
+  if(reentryScheduled||!trading||!synchronized||entryInFlight||currentPosition)return;
+  reentryScheduled=true;
+  queueMicrotask(()=>{
+    reentryScheduled=false;
+    if(!trading||!synchronized||entryInFlight||currentPosition)return;
+    const prev=previousMid,mid=lastMid;
+    if(!Number.isFinite(prev)||!Number.isFinite(mid)||prev===mid){
+      setStatus(`${reason} — waiting for next price tick`);
+      return;
+    }
+    const side=prev<mid?'BUY':prev>mid?'SELL':'';
+    if(side){
+      addLog(`${reason} — immediate ${side} re-entry`);
+      void enter(side,side==='BUY'?lastAsk:lastBid);
+    }
+  });
+}
+
+async function onTick(mid,bid,ask){
+  if(!trading||!synchronized)return;
+  if(!currentPosition){
+    if(entryInFlight||!Number.isFinite(previousMid)||previousMid===mid){if(!Number.isFinite(previousMid))setStatus('Streaming XAUUSD — waiting for first movement');return;}
+    const side=previousMid<mid?'BUY':previousMid>mid?'SELL':'';
+    if(side)await enter(side,side==='BUY'?ask:bid);
+    return;
+  }
+  await trail(bid,ask);
+  const sl=Number(currentPosition.stopLoss??currentStop?.openPrice??0);
+  setStatus(`Running ${sideOf(currentPosition)} | TRAILING SL ${fmt(sl)} | 70 PIPS`);
+}
+
 async function cancelOrder(id){if(id&&connection){try{await connection.cancelOrder(id);}catch(_){}}}
 
 function startForegroundService(){try{if(window.AndroidBot?.startForegroundBot)window.AndroidBot.startForegroundBot();}catch(_) {}}
@@ -160,7 +235,7 @@ function renderTrades(){
   const el=$('tradesInfo');if(!el)return;
   if(!connection){el.innerHTML='<div class="empty">MetaApi is not connected.<br>Connect from Dashboard to view live trades.</div>';return;}
   const pos=currentPosition, stop=currentStop;
-  el.innerHTML=`<div class="info-row"><span>Engine</span><b class="${trading?'green':''}">${trading?'RUNNING':'STOPPED'}</b></div><div class="info-row"><span>Connection</span><b>${synchronized?'CONNECTED':'SYNCING'}</b></div><div class="info-row"><span>Symbol</span><b>${SYMBOL}</b></div><div class="info-row"><span>Position</span><b>${pos?sideOf(pos):'NONE'}</b></div><div class="info-row"><span>Volume</span><b>${pos?fmt(volumeOf(pos))+' LOT':'—'}</b></div><div class="info-row"><span>Entry</span><b>${pos?fmt(Number(pos.openPrice)):'—'}</b></div><div class="info-row"><span>Opposite STOP</span><b class="red">${stop?fmt(Number(stop.openPrice??stop.currentPrice)):'—'}</b></div>`;
+  el.innerHTML=`<div class="info-row"><span>Engine</span><b class="${trading?'green':''}">${trading?'RUNNING':'STOPPED'}</b></div><div class="info-row"><span>Connection</span><b>${synchronized?'CONNECTED':'SYNCING'}</b></div><div class="info-row"><span>Symbol</span><b>${SYMBOL}</b></div><div class="info-row"><span>Position</span><b>${pos?sideOf(pos):'NONE'}</b></div><div class="info-row"><span>Volume</span><b>${pos?fmt(volumeOf(pos))+' LOT':'—'}</b></div><div class="info-row"><span>Entry</span><b>${pos?fmt(Number(pos.openPrice)):'—'}</b></div><div class="info-row"><span>Trailing SL</span><b class="red">${stop&&Number(stop.openPrice)>0?fmt(Number(stop.openPrice)):'—'}</b></div>`;
 }
 function renderHistory(){
   const el=$('historyInfo');if(!el)return;
@@ -175,7 +250,7 @@ function renderPageData(){
   const p=currentPosition,s=currentStop;
   if($('sideBadge')){const side=sideOf(p);$('sideBadge').textContent=side||'WAITING';$('sideBadge').classList.toggle('sell',side==='SELL');}
   if($('positionPrice'))$('positionPrice').textContent=p?fmt(Number(p.openPrice)):'—';
-  if($('stopDetail'))$('stopDetail').textContent=s?fmt(Number(s.openPrice??s.currentPrice)):'—';
+  if($('stopDetail'))$('stopDetail').textContent=s&&Number(s.openPrice)>0?fmt(Number(s.openPrice)):'—';
   renderTrades();renderHistory();renderLogs();
 }
 
@@ -184,4 +259,4 @@ $('nav-dashboard').onclick=()=>showPage('dashboard');$('nav-trades').onclick=()=
 
 const savedToken=cleanToken(localStorage.getItem('metaapi.token')),savedAccount=String(localStorage.getItem('metaapi.accountId')||'').trim();
 if(savedToken&&savedAccount){ui.token.value=savedToken;ui.account.value=savedAccount;addLog('Saved credentials found — reconnecting');connectSdk().finally(()=>{ui.token.value='SAVED TOKEN';ui.token.disabled=true;});}
-addLog('Pips-life engine loaded');renderPageData();
+addLog('Pips-life engine loaded — 70-pip trailing SL');renderPageData();
