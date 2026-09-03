@@ -42,10 +42,16 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build APK
-        run: gradle assembleDebug --stacktrace
+      - name: Build RELEASE APK
+        run: gradle assembleRelease --stacktrace
+
+      - name: Verify release APK
+        run: |
+          test -s app/build/outputs/apk/release/app-release.apk
+          file app/build/outputs/apk/release/app-release.apk
+          ls -lh app/build/outputs/apk/release/app-release.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multi-bot-js-sdk-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: Multi-bot-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
