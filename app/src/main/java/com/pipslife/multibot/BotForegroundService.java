@@ -8,8 +8,6 @@ import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
 
-import androidx.annotation.Nullable;
-
 /**
  * Keeps the Multi-bot process in the foreground while the trading bot is running.
  * The actual MetaApi WebSocket/strategy remains in the WebView JavaScript SDK.
@@ -68,7 +66,6 @@ public class BotForegroundService extends Service {
         super.onDestroy();
     }
 
-    @Nullable
     @Override
     public IBinder onBind(Intent intent) {
         return null;
