@@ -23,9 +23,7 @@ function sideOf(x) {
   const t = String(x?.type ?? '').toUpperCase();
   return t.includes('BUY') ? 'BUY' : t.includes('SELL') ? 'SELL' : '';
 }
-function isOurs(x) {
-  return x && x.symbol === SYMBOL && Number(x.magic ?? MAGIC) === MAGIC;
-}
+function isOurs(x) { return x && x.symbol === SYMBOL && Number(x.magic ?? MAGIC) === MAGIC; }
 function idOf(x) { return String(x?.id ?? x?.positionId ?? x?.orderId ?? ''); }
 function volumeOf(x) { return Number(x?.volume ?? 0); }
 function pipValueFromSpec(s) {
@@ -58,12 +56,23 @@ function opposite(side) { return side === 'BUY' ? 'SELL' : 'BUY'; }
 function stopCandidate(side, mid, pipSize) {
   return side === 'BUY' ? mid - TRAIL_PIPS * pipSize : mid + TRAIL_PIPS * pipSize;
 }
+function cleanToken(value) {
+  return String(value ?? '').trim().replace(/^Bearer\s+/i, '');
+}
+function validAccountId(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+function sdkConstructor() {
+  const Ctor = MetaApi?.default ?? MetaApi;
+  if (typeof Ctor !== 'function') throw new Error('MetaApi browser SDK constructor is unavailable');
+  return Ctor;
+}
 
 class BotListener extends SynchronizationListener {
-  onConnected(instanceIndex) { setStatus('MetaApi connected — synchronizing…'); }
-  onDisconnected(instanceIndex) { synchronized = false; setStatus('MetaApi disconnected — waiting to reconnect…'); }
-  onSynchronizationStarted(instanceIndex) { synchronized = false; setStatus('Synchronizing MetaApi terminal…'); }
-  onSynchronizationFinished(instanceIndex) {
+  onConnected() { setStatus('MetaApi connected — synchronizing…'); }
+  onDisconnected() { synchronized = false; setStatus('MetaApi disconnected — waiting to reconnect…'); }
+  onSynchronizationStarted() { synchronized = false; setStatus('Synchronizing MetaApi terminal…'); }
+  onSynchronizationFinished() {
     synchronized = true;
     setStatus('CONNECTED — XAUUSD live stream active');
     reconcile();
@@ -83,23 +92,28 @@ class BotListener extends SynchronizationListener {
     void onTick(mid, bid, ask, previous);
   }
   onPositionUpdated(instanceIndex, position) { if (position?.symbol === SYMBOL) reconcile(); }
-  onPositionRemoved(instanceIndex, positionId, position) { reconcile(); }
+  onPositionRemoved() { reconcile(); }
   onOrderUpdated(instanceIndex, order) { if (order?.symbol === SYMBOL) reconcile(); }
-  onOrderCompleted(instanceIndex, orderId, order) { reconcile(); }
+  onOrderCompleted() { reconcile(); }
   onOrderFailed(instanceIndex, orderId, error) { setStatus(`Order failed: ${error?.message || error}`); reconcile(); }
 }
 
 async function connectSdk() {
   if (connecting || connection) return;
-  const token = ui.token.value.trim();
+  const token = cleanToken(ui.token.value);
   const accountId = ui.account.value.trim();
-  if (!token || !accountId) { setStatus('Enter MetaAPI token and account ID'); return; }
+  if (!token || token === 'SAVED TOKEN') { setStatus('MetaAPI token is missing'); return; }
+  if (!accountId) { setStatus('MetaAPI account ID is missing'); return; }
+  if (!validAccountId(accountId)) { setStatus('MetaAPI account ID format is invalid'); return; }
   connecting = true;
-  setStatus('Connecting to MetaApi…');
+  setStatus('Connecting directly to MetaApi…');
   try {
-    api = new MetaApi(token);
+    const MetaApiClass = sdkConstructor();
+    api = new MetaApiClass(token);
     account = await api.metatraderAccountApi.getAccount(accountId);
-    if (!account) throw new Error('MetaApi account not found');
+    if (!account?.id) throw new Error('MetaApi account not found');
+    setStatus('MetaApi account found — checking deployment…');
+    if (typeof account.waitConnected === 'function') await account.waitConnected();
     connection = account.getStreamingConnection();
     listener = new BotListener();
     connection.addSynchronizationListener(listener);
@@ -110,8 +124,11 @@ async function connectSdk() {
     reconcile();
     setStatus('CONNECTED — XAUUSD live stream active');
   } catch (e) {
+    const msg = e?.message || String(e);
+    try { if (connection) await connection.close(); } catch (_) {}
+    try { if (api) await api.close(); } catch (_) {}
     connection = null; account = null; api = null; synchronized = false;
-    setStatus(`MetaApi connection failed: ${e?.message || e}`);
+    setStatus(`MetaApi connection failed: ${msg}`);
   } finally { connecting = false; }
 }
 
@@ -122,9 +139,7 @@ function reconcile() {
   const orders = (state.orders || []).filter(isOurs);
   const next = positions[0] || null;
   const old = currentPosition;
-  if (old && next && idOf(old) !== idOf(next) && sideOf(old) !== sideOf(next)) {
-    void handleReversal(old, next);
-  }
+  if (old && next && idOf(old) !== idOf(next) && sideOf(old) !== sideOf(next)) void handleReversal(old, next);
   currentPosition = next;
   const stops = orders.filter(o => String(o.type ?? '').toUpperCase().includes('STOP'));
   const expected = next ? opposite(sideOf(next)) : '';
@@ -134,17 +149,14 @@ function reconcile() {
   const stopPrice = Number(currentStop?.openPrice ?? currentStop?.currentPrice ?? 0);
   ui.stop.textContent = stopPrice > 0 ? fmt(stopPrice) : '—';
   if (next && !currentStop && !stopActionInFlight) void placeOppositeStop(next);
-  if (!next && stops.length) {
-    for (const o of stops) void cancelOrder(idOf(o));
-  }
+  if (!next && stops.length) for (const o of stops) void cancelOrder(idOf(o));
 }
 
 async function handleReversal(oldPosition, newPosition) {
   if (idOf(oldPosition) === idOf(newPosition)) return;
   try {
-    if (connection && connection.terminalState.positions.some(p => idOf(p) === idOf(oldPosition))) {
+    if (connection && connection.terminalState.positions.some(p => idOf(p) === idOf(oldPosition)))
       await connection.closePosition(idOf(oldPosition));
-    }
   } catch (e) {
     const msg = String(e?.message || e);
     if (!/not found|does not exist|position.*closed/i.test(msg)) setStatus(`Closing previous position failed: ${msg}`);
@@ -154,7 +166,7 @@ async function handleReversal(oldPosition, newPosition) {
   await placeOppositeStop(newPosition);
 }
 
-async function enter(side, price) {
+async function enter(side) {
   if (entryInFlight || currentPosition) return;
   const volume = currentVolume();
   if (volume <= 0) { setStatus('Cannot size trade: broker pip value/specification unavailable'); return; }
@@ -191,10 +203,8 @@ async function placeOppositeStop(position) {
     const volume = volumeOf(position) || currentVolume();
     if (!volume || !Number.isFinite(price)) return;
     const options = { comment: 'Multi-bot 100-pip opposite STOP', clientId: `MBSTOP-${Date.now()}` };
-    if (sideOf(position) === 'BUY')
-      await connection.createStopSellOrder(SYMBOL, volume, price, null, null, options);
-    else
-      await connection.createStopBuyOrder(SYMBOL, volume, price, null, null, options);
+    if (sideOf(position) === 'BUY') await connection.createStopSellOrder(SYMBOL, volume, price, null, null, options);
+    else await connection.createStopBuyOrder(SYMBOL, volume, price, null, null, options);
     reconcile();
   } catch (e) { setStatus(`STOP placement failed: ${e?.message || e}`); }
   finally { stopActionInFlight = false; }
@@ -223,31 +233,34 @@ async function onTick(mid, bid, ask, previous) {
       if (Number.isNaN(previous)) setStatus('Streaming XAUUSD — waiting for first movement');
       return;
     }
-    if (previous < mid) await enter('BUY', ask);
-    else if (previous > mid) await enter('SELL', bid);
+    if (previous < mid) await enter('BUY');
+    else if (previous > mid) await enter('SELL');
     return;
   }
   await trail(mid);
   setStatus(`Running ${sideOf(currentPosition)} | STOP ${fmt(Number(currentStop?.openPrice ?? currentStop?.currentPrice ?? 0))}`);
 }
 
-async function cancelOrder(id) {
-  if (!id || !connection) return;
-  try { await connection.cancelOrder(id); } catch (_) {}
-}
+async function cancelOrder(id) { if (id && connection) { try { await connection.cancelOrder(id); } catch (_) {} } }
 
 function saveCredentials() {
-  const token = ui.token.value.trim(), accountId = ui.account.value.trim();
-  if (!token || !accountId) { setStatus('Enter MetaAPI token and account ID'); return; }
+  const token = cleanToken(ui.token.value);
+  const accountId = ui.account.value.trim();
+  if (!token || token === 'SAVED TOKEN') { setStatus('Enter a valid MetaAPI token'); return; }
+  if (!validAccountId(accountId)) { setStatus('Enter a valid MetaAPI account ID'); return; }
   localStorage.setItem('metaapi.token', token);
   localStorage.setItem('metaapi.accountId', accountId);
   ui.token.value = 'SAVED TOKEN'; ui.token.disabled = true; ui.account.value = accountId;
-  connectSdk();
+  const original = token;
+  ui.token.value = original;
+  connectSdk().finally(() => { ui.token.value = 'SAVED TOKEN'; ui.token.disabled = true; });
 }
 
 function changeCredentials() {
-  trading = false; localStorage.removeItem('metaapi.token'); localStorage.removeItem('metaapi.accountId');
+  trading = false;
+  localStorage.removeItem('metaapi.token'); localStorage.removeItem('metaapi.accountId');
   if (connection) connection.close().catch(() => {});
+  if (api) api.close().catch(() => {});
   connection = null; account = null; api = null; synchronized = false; currentPosition = null; currentStop = null;
   ui.token.disabled = false; ui.token.value = ''; ui.account.value = '';
   setStatus('Enter new MetaAPI credentials');
@@ -264,10 +277,10 @@ ui.change.onclick = changeCredentials;
 ui.start.onclick = startBot;
 ui.stopBot.onclick = stopBot;
 
-const savedToken = localStorage.getItem('metaapi.token');
-const savedAccount = localStorage.getItem('metaapi.accountId');
+const savedToken = cleanToken(localStorage.getItem('metaapi.token'));
+const savedAccount = String(localStorage.getItem('metaapi.accountId') || '').trim();
 if (savedToken && savedAccount) {
-  ui.token.value = 'SAVED TOKEN'; ui.token.disabled = true; ui.account.value = savedAccount;
-  const original = ui.token.value; ui.token.value = savedToken;
-  connectSdk().finally(() => { ui.token.value = original; ui.token.disabled = true; });
+  ui.token.value = savedToken;
+  ui.account.value = savedAccount;
+  connectSdk().finally(() => { ui.token.value = 'SAVED TOKEN'; ui.token.disabled = true; });
 }
