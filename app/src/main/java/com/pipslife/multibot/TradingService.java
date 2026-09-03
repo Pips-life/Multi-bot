@@ -5,30 +5,82 @@ import android.content.*;
 import android.os.IBinder;
 import android.os.Build;
 import android.content.pm.ServiceInfo;
-import org.json.*;
-import java.util.*;
-import io.socket.client.IO;
-import io.socket.client.Socket;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+import cloud.metaapi.sdk.clients.meta_api.SynchronizationListener;
+import cloud.metaapi.sdk.clients.meta_api.models.MarketDataSubscription;
+import cloud.metaapi.sdk.clients.meta_api.models.MetatraderSymbolPrice;
+import cloud.metaapi.sdk.clients.meta_api.models.TradeOptions;
+import cloud.metaapi.sdk.meta_api.MetaApi;
+import cloud.metaapi.sdk.meta_api.MetaApiConnection;
+import cloud.metaapi.sdk.meta_api.MetatraderAccount;
+import io.vertx.core.Vertx;
+
+/**
+ * Direct MetaApi integration using MetaApi's official Java SDK.
+ *
+ * No raw Socket.IO/WebSocket protocol is implemented here. The SDK owns
+ * authentication, synchronization, streaming and trade transport.
+ */
 public class TradingService extends Service {
     public static final String ACTION_START="START", ACTION_STOP="STOP", ACTION_STATUS="STATUS";
-    private static final String URL="https://mt-client-api-v1.agiliumtrade.agiliumtrade.ai";
     private static final String CHANNEL="multibot";
+    private static final String SYMBOL="XAUUSD";
     private static final int MAGIC=260903;
-    private Socket socket; private String accountId, token;
-    private volatile boolean running=false, trading=false;
+    private static final double TRAIL_PIPS=100.0;
+
+    private MetaApi api;
+    private MetaApiConnection connection;
+    private MetatraderAccount account;
+    private Vertx vertx;
+    private final ExecutorService executor=Executors.newSingleThreadExecutor();
+    private volatile boolean running=false, trading=false, synchronizedState=false;
+    private String accountId, token;
     private double lastMid=Double.NaN, balance=0, pipSize=0.01, pipValue=0, volume=0;
     private double minVolume=0.01, maxVolume=100, volumeStep=0.01;
-    private String positionId="", positionSide="", sourcePositionId="";
+    private String positionId="", positionSide="";
     private double positionPrice=0, positionVolume=0;
-    private String stopId="", stopSide=""; private double stopPrice=0;
+    private String stopId="", stopSide="";
+    private double stopPrice=0;
+    private String sourcePositionId="";
     private boolean waitingForStopFill=false;
-    private String synchronizeRequestId="", waitRequestId="";
 
     @Override public void onCreate(){ super.onCreate(); createChannel(); }
-    private void createChannel(){ if(Build.VERSION.SDK_INT>=26){ NotificationChannel c=new NotificationChannel(CHANNEL,"Multi-bot",NotificationManager.IMPORTANCE_LOW); getSystemService(NotificationManager.class).createNotificationChannel(c); } }
-    private void notifyState(String text){ Intent i=new Intent(ACTION_STATUS); i.setPackage(getPackageName()); i.putExtra("text",text); i.putExtra("bid",lastMid); i.putExtra("balance",balance); i.putExtra("side",positionSide); i.putExtra("stop",stopPrice); sendBroadcast(i); }
-    private void foreground(String text){ Notification.Builder b=Build.VERSION.SDK_INT>=26?new Notification.Builder(this,CHANNEL):new Notification.Builder(this); b.setContentTitle("Multi-bot").setContentText(text).setSmallIcon(android.R.drawable.ic_menu_compass).setOngoing(true); if(Build.VERSION.SDK_INT>=29)startForeground(7,b.build(),ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC); else startForeground(7,b.build()); }
+
+    private void createChannel(){
+        if(Build.VERSION.SDK_INT>=26){
+            NotificationChannel c=new NotificationChannel(CHANNEL,"Multi-bot",NotificationManager.IMPORTANCE_LOW);
+            getSystemService(NotificationManager.class).createNotificationChannel(c);
+        }
+    }
+
+    private void notifyState(String text){
+        Intent i=new Intent(ACTION_STATUS);
+        i.setPackage(getPackageName());
+        i.putExtra("text",text);
+        i.putExtra("bid",lastMid);
+        i.putExtra("balance",balance);
+        i.putExtra("side",positionSide);
+        i.putExtra("stop",stopPrice);
+        sendBroadcast(i);
+    }
+
+    private void foreground(String text){
+        Notification.Builder b=Build.VERSION.SDK_INT>=26
+                ?new Notification.Builder(this,CHANNEL)
+                :new Notification.Builder(this);
+        b.setContentTitle("Multi-bot").setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_menu_compass).setOngoing(true);
+        if(Build.VERSION.SDK_INT>=29)
+            startForeground(7,b.build(),ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+        else startForeground(7,b.build());
+    }
 
     @Override public int onStartCommand(Intent intent,int flags,int startId){
         if(intent!=null && ACTION_STOP.equals(intent.getAction())) { stopEngine(); return START_NOT_STICKY; }
@@ -42,239 +94,317 @@ public class TradingService extends Service {
         trading=getSharedPreferences("runtime",0).getBoolean("trading",false);
         foreground(trading?"Starting live bot…":"Connecting to MetaApi…");
         try{
-            SecureStore s=new SecureStore(this); accountId=s.accountId(); token=s.token();
+            SecureStore s=new SecureStore(this);
+            accountId=s.accountId(); token=s.token();
             if(accountId.isEmpty()||token.isEmpty())throw new Exception("MetaAPI credentials are not saved");
-            connect();
-        } catch(Exception e){
+            executor.submit(this::connectSdk);
+        }catch(Exception e){
             running=false; notifyState("Setup required: "+safe(e)); stopForeground(STOP_FOREGROUND_REMOVE);
         }
     }
 
-    private void connect()throws Exception{
-        IO.Options o=new IO.Options();
-        o.path="/ws";
-        o.query="auth-token="+token;
-        o.reconnection=true;
-        o.timeout=15000;
-        socket=IO.socket(URL,o);
+    private void connectSdk(){
+        try{
+            vertx=Vertx.vertx();
+            api=new MetaApi(token,vertx);
+            notifyState("MetaApi SDK: loading account…");
 
-        socket.on(Socket.EVENT_CONNECT,args->{
-            notifyState("MetaApi socket connected — authenticating account…");
-            JSONObject req=base("subscribe");
-            emit(req);
-        });
-        socket.on(Socket.EVENT_CONNECT_ERROR,args->{
-            notifyState("MetaApi connection error: "+(args.length>0?safe(args[0]):"unknown error"));
-        });
-        socket.on(Socket.EVENT_ERROR,args->{
-            notifyState("MetaApi socket error: "+(args.length>0?safe(args[0]):"unknown error"));
-        });
-        socket.on(Socket.EVENT_DISCONNECT,args->{
-            if(running)notifyState("MetaApi disconnected — reconnecting…");
-        });
-        socket.on("response",args->{
-            if(args.length>0)try{handleResponse((JSONObject)args[0]);}catch(Exception e){notifyState("MetaApi response error: "+safe(e));}
-        });
-        socket.on("synchronization",args->{
-            if(args.length>0)try{handleSync((JSONObject)args[0]);}catch(Exception e){notifyState("MetaApi sync error: "+safe(e));}
-        });
-        socket.on("processingError",args->{
-            notifyState("MetaApi rejected request: "+(args.length>0?safe(args[0]):"unknown error"));
-        });
-        socket.connect();
-    }
+            account=api.getMetatraderAccountApi().getAccount(accountId)
+                    .toCompletionStage().toCompletableFuture().get();
+            if(account==null)throw new Exception("MetaApi account not found");
 
-    private JSONObject base(String type){
-        JSONObject j=new JSONObject();
-        try{j.put("accountId",accountId).put("type",type).put("requestId",UUID.randomUUID().toString());}catch(Exception ignored){}
-        return j;
-    }
-    private void emit(JSONObject payload){if(socket!=null&&socket.connected())socket.emit("request",payload);}
+            notifyState("MetaApi SDK: account found — connecting to broker…");
+            connection=account.connect().toCompletionStage().toCompletableFuture().get();
 
-    private void handleResponse(JSONObject d)throws Exception{
-        String type=d.optString("type");
-        String requestId=d.optString("requestId");
-        if("response".equals(type) && requestId.equals(synchronizeRequestId)){
-            JSONObject req=base("waitSynchronized"); waitRequestId=req.optString("requestId"); emit(req);
-            notifyState("MetaApi authenticated — synchronizing terminal…");
-        } else if("response".equals(type) && requestId.equals(waitRequestId)){
-            subscribeMarketData();
-            notifyState("Terminal synchronized — XAUUSD live stream active");
-        } else if("tradeResult".equals(type)){
-            JSONObject r=d.optJSONObject("response");
-            if(r!=null && r.optInt("numericCode",0)!=10009 && r.optInt("numericCode",0)!=0){
-                notifyState("Trade error: "+r.optString("stringCode",r.optString("message","unknown")));
-            }
-        }
-    }
-
-    private void handleSync(JSONObject d)throws Exception{
-        String type=d.optString("type");
-        if("authenticated".equals(type)){
-            JSONObject req=base("synchronize");
-            synchronizeRequestId=req.optString("requestId");
-            emit(req);
-            notifyState("MetaApi account authenticated — requesting terminal synchronization…");
-        }
-        else if("accountInformation".equals(type)){
-            JSONObject a=d.optJSONObject("accountInformation");
-            if(a!=null)balance=a.optDouble("balance",balance);
-            recalcVolume();
-        }
-        else if("specifications".equals(type)){
-            JSONArray a=d.optJSONArray("specifications");
-            if(a!=null)for(int i=0;i<a.length();i++){
-                JSONObject x=a.getJSONObject(i);
-                if("XAUUSD".equals(x.optString("symbol"))){
-                    double ps=x.optDouble("pipSize",0);
-                    if(ps>0)pipSize=ps; else pipSize=x.optDouble("point",x.optDouble("tickSize",pipSize));
-                    minVolume=x.optDouble("minVolume",minVolume);
-                    maxVolume=x.optDouble("maxVolume",maxVolume);
-                    volumeStep=x.optDouble("volumeStep",volumeStep);
-                }
-            }
-            recalcVolume();
-        }
-        else if("positions".equals(type)){
-            JSONArray a=d.optJSONArray("positions");if(a!=null)syncPositions(a);
-        }
-        else if("orders".equals(type)){
-            JSONArray a=d.optJSONArray("orders");if(a!=null)syncOrders(a);
-        }
-        else if("prices".equals(type)){
-            JSONArray a=d.optJSONArray("prices");
-            if(a!=null)for(int i=0;i<a.length();i++){
-                JSONObject p=a.getJSONObject(i);
-                if("XAUUSD".equals(p.optString("symbol")))onPrice(p);
-            }
-        }
-        else if("status".equals(type))handleStatus(d);
-        else if("update".equals(type))handleStatus(d);
-    }
-
-    private void subscribeMarketData()throws Exception{
-        JSONObject sub=base("subscribeToMarketData");
-        sub.put("symbol","XAUUSD");
-        sub.put("subscriptions",new JSONArray()
-            .put(new JSONObject().put("type","ticks"))
-            .put(new JSONObject().put("type","quotes")));
-        emit(sub);
-    }
-
-    private void syncPositions(JSONArray a){
-        String previous=positionId;
-        positionId="";positionSide="";
-        for(int i=0;i<a.length();i++)try{JSONObject p=a.getJSONObject(i);if(isOurs(p))upsertPosition(p);}catch(Exception ignored){}
-        if(!previous.isEmpty() && positionId.isEmpty()) waitingForStopFill=false;
-    }
-    private void syncOrders(JSONArray a){
-        stopId="";
-        for(int i=0;i<a.length();i++)try{JSONObject o=a.getJSONObject(i);if(isOurs(o)&&o.optString("type").contains("STOP"))upsertOrder(o);}catch(Exception ignored){}
-    }
-    private boolean isOurs(JSONObject x){return "XAUUSD".equals(x.optString("symbol"))&&x.optInt("magic",-1)==MAGIC;}
-    private void upsertPosition(JSONObject p){
-        positionId=p.optString("id",p.optString("positionId",positionId));
-        positionSide=p.optString("type").contains("BUY")?"BUY":"SELL";
-        positionPrice=p.optDouble("openPrice",positionPrice);
-        positionVolume=p.optDouble("volume",positionVolume);
-    }
-    private void upsertOrder(JSONObject o){
-        stopId=o.optString("id",o.optString("orderId",stopId));
-        stopSide=o.optString("type").contains("BUY")?"BUY":"SELL";
-        stopPrice=o.optDouble("openPrice",stopPrice);
-    }
-
-    private void handleStatus(JSONObject d)throws Exception{
-        JSONArray done=d.optJSONArray("completedOrderIds");
-        if(done!=null)for(int i=0;i<done.length();i++)if(stopId.equals(done.optString(i))){waitingForStopFill=true;stopId="";}
-        JSONArray up=d.optJSONArray("updatedPositions");
-        if(waitingForStopFill&&up!=null){
-            for(int i=0;i<up.length();i++){
-                JSONObject p=up.getJSONObject(i);
-                if(isOurs(p)){
-                    String newId=p.optString("id",p.optString("positionId"));
-                    String newSide=p.optString("type").contains("BUY")?"BUY":"SELL";
-                    if(!newId.equals(sourcePositionId) && !newId.isEmpty()){
-                        String oldId=sourcePositionId.isEmpty()?positionId:sourcePositionId;
-                        if(!oldId.isEmpty()&&!oldId.equals(newId))closePosition(oldId);
-                        positionId=newId; positionSide=newSide; positionPrice=p.optDouble("openPrice",0); positionVolume=p.optDouble("volume",volume);
-                        waitingForStopFill=false; sourcePositionId=positionId; placeStopForCurrent();
-                        break;
+            connection.addSynchronizationListener(new SynchronizationListener(){
+                @Override public io.vertx.core.Future<Void> onSymbolPriceUpdated(
+                        String instanceIndex, MetatraderSymbolPrice price){
+                    if(price!=null && SYMBOL.equals(price.symbol)){
+                        executor.submit(()->handlePrice(price));
                     }
+                    return io.vertx.core.Future.succeededFuture();
                 }
-            }
+            });
+
+            notifyState("MetaApi SDK: synchronizing terminal…");
+            connection.waitSynchronized().toCompletionStage().toCompletableFuture().get();
+            synchronizedState=true;
+
+            refreshTerminalState();
+            subscribe();
+            notifyState("CONNECTED — XAUUSD live stream active");
+        }catch(Exception e){
+            synchronizedState=false;
+            notifyState("MetaApi SDK connection failed: "+safe(rootCause(e)));
         }
-        if(up!=null)for(int i=0;i<up.length();i++)try{JSONObject p=up.getJSONObject(i);if(isOurs(p))upsertPosition(p);}catch(Exception ignored){}
-        JSONArray rem=d.optJSONArray("removedPositionIds");
-        if(rem!=null)for(int i=0;i<rem.length();i++)if(positionId.equals(rem.optString(i)))positionId="";
-        JSONArray ord=d.optJSONArray("updatedOrders");
-        if(ord!=null)for(int i=0;i<ord.length();i++)try{JSONObject o=ord.getJSONObject(i);if(isOurs(o)&&o.optString("type").contains("STOP"))upsertOrder(o);}catch(Exception ignored){}
     }
 
-    private void onPrice(JSONObject p)throws Exception{
-        double bid=p.optDouble("bid",Double.NaN),ask=p.optDouble("ask",Double.NaN);
-        if(Double.isNaN(bid)||Double.isNaN(ask))return;
-        double mid=(bid+ask)/2;
-        double tv=p.optDouble("profitTickValue",0); if(tv>0){pipValue=tv;recalcVolume();}
-        double prev=lastMid;lastMid=mid;
-        if(!trading){notifyState("Live XAUUSD: "+fmt(mid));return;}
-        if(Double.isNaN(prev)){notifyState("Streaming XAUUSD — waiting for first movement");return;}
-        if(positionId.isEmpty()){
-            if(prev<mid)enter("BUY",ask); else if(prev>mid)enter("SELL",bid);
-        } else trail(mid);
-        notifyState(positionSide.isEmpty()?"Waiting for entry":"Running "+positionSide+" | STOP "+fmt(stopPrice));
+    private void subscribe()throws Exception{
+        List<MarketDataSubscription> subscriptions=new ArrayList<>();
+        subscriptions.add(new MarketDataSubscription(){{ type="quotes"; intervalInMilliseconds=0; }});
+        subscriptions.add(new MarketDataSubscription(){{ type="ticks"; }});
+        connection.subscribeToMarketData(SYMBOL,subscriptions)
+                .toCompletionStage().toCompletableFuture().get();
+    }
+
+    private void handlePrice(MetatraderSymbolPrice price){
+        try{
+            double bid=number(price,"bid",Double.NaN);
+            double ask=number(price,"ask",Double.NaN);
+            if(Double.isNaN(bid)||Double.isNaN(ask))return;
+            double mid=(bid+ask)/2.0;
+            double previous=lastMid;
+            lastMid=mid;
+
+            refreshTerminalState();
+
+            if(!trading){
+                notifyState("CONNECTED — XAUUSD "+fmt(mid));
+                return;
+            }
+            if(!synchronizedState){
+                notifyState("Synchronizing MetaApi terminal…");
+                return;
+            }
+
+            if(Double.isNaN(previous)){
+                notifyState("Streaming XAUUSD — waiting for first movement");
+                return;
+            }
+
+            if(positionId.isEmpty()){
+                if(previous<mid) enter("BUY",ask);
+                else if(previous>mid) enter("SELL",bid);
+            }else{
+                trail(mid);
+            }
+            notifyState(positionSide.isEmpty()?"Waiting for entry":"Running "+positionSide+" | STOP "+fmt(stopPrice));
+        }catch(Exception e){
+            notifyState("MetaApi SDK runtime error: "+safe(rootCause(e)));
+        }
+    }
+
+    /**
+     * TerminalState is maintained by the official SDK from streaming updates.
+     * Reading it is local and avoids implementing MetaApi's wire protocol.
+     */
+    private void refreshTerminalState(){
+        if(connection==null)return;
+        try{
+            Object state=connection.getTerminalState();
+            Object info=invoke(state,"getAccountInformation");
+            if(info!=null)balance=number(info,"balance",balance);
+
+            Object spec=invoke(state,"getSpecification",SYMBOL);
+            if(spec!=null){
+                pipSize=number(spec,"pipSize",number(spec,"point",number(spec,"tickSize",pipSize)));
+                minVolume=number(spec,"minVolume",minVolume);
+                maxVolume=number(spec,"maxVolume",maxVolume);
+                volumeStep=number(spec,"volumeStep",volumeStep);
+                pipValue=number(spec,"pipValue",pipValue);
+                recalcVolume();
+            }
+
+            syncPositions(invokeList(state,"getPositions"));
+            syncOrders(invokeList(state,"getOrders"));
+        }catch(Exception e){
+            // State may briefly be incomplete during reconnect; keep last known state.
+        }
+    }
+
+    private List<?> invokeList(Object target,String method){
+        Object result=invoke(target,method);
+        return result instanceof List ? (List<?>)result : Collections.emptyList();
+    }
+
+    private void syncPositions(List<?> positions){
+        String old=positionId;
+        String foundId="", foundSide="";
+        double foundPrice=0, foundVolume=0;
+        for(Object p:positions){
+            if(!isOurs(p))continue;
+            String id=text(p,"id",text(p,"positionId",""));
+            if(id.isEmpty())continue;
+            foundId=id;
+            foundSide=typeSide(text(p,"type",""));
+            foundPrice=number(p,"openPrice",0);
+            foundVolume=number(p,"volume",0);
+            break;
+        }
+        if(waitingForStopFill && !old.isEmpty() && !foundId.isEmpty() && !foundId.equals(old)){
+            try{
+                closePosition(old);
+                positionId=foundId; positionSide=foundSide; positionPrice=foundPrice; positionVolume=foundVolume;
+                sourcePositionId=foundId; waitingForStopFill=false;
+                placeStopForCurrent();
+            }catch(Exception e){ notifyState("Reversal handling failed: "+safe(rootCause(e))); }
+        }else{
+            positionId=foundId; positionSide=foundSide; positionPrice=foundPrice; positionVolume=foundVolume;
+            if(foundId.isEmpty()){
+                positionPrice=0;positionVolume=0;
+                if(!old.isEmpty()) waitingForStopFill=false;
+            }
+        }
+    }
+
+    private void syncOrders(List<?> orders){
+        String foundId="", foundSide="";
+        double foundPrice=0;
+        for(Object o:orders){
+            if(!isOurs(o))continue;
+            String type=text(o,"type","").toUpperCase(Locale.US);
+            if(!type.contains("STOP"))continue;
+            String id=text(o,"id",text(o,"orderId",""));
+            if(id.isEmpty())continue;
+            foundId=id;
+            foundSide=type.contains("BUY")?"BUY":"SELL";
+            foundPrice=number(o,"openPrice",number(o,"currentPrice",0));
+            break;
+        }
+        stopId=foundId; stopSide=foundSide; if(foundPrice>0)stopPrice=foundPrice;
+    }
+
+    private boolean isOurs(Object x){
+        return SYMBOL.equals(text(x,"symbol","")) && number(x,"magic",-1)==MAGIC;
+    }
+
+    private void enter(String side,double price)throws Exception{
+        recalcVolume();
+        if(volume<=0)return;
+        TradeOptions options=new TradeOptions();
+        options.comment="Multi-bot Velocity Expansion";
+        options.clientId="MBENTRY-"+UUID.randomUUID();
+        if("BUY".equals(side))
+            connection.createMarketBuyOrder(SYMBOL,volume,null,null,options)
+                    .toCompletionStage().toCompletableFuture().get();
+        else
+            connection.createMarketSellOrder(SYMBOL,volume,null,null,options)
+                    .toCompletionStage().toCompletableFuture().get();
+    }
+
+    private void trail(double mid)throws Exception{
+        if(positionId.isEmpty())return;
+        double candidate="BUY".equals(positionSide)
+                ?mid-TRAIL_PIPS*pipSize
+                :mid+TRAIL_PIPS*pipSize;
+
+        if(stopId.isEmpty()){
+            if(stopPrice==0 || ("BUY".equals(positionSide)&&candidate>stopPrice)
+                    ||("SELL".equals(positionSide)&&candidate<stopPrice)) placeStop(candidate);
+            return;
+        }
+
+        boolean improve="BUY".equals(positionSide)?candidate>stopPrice:candidate<stopPrice;
+        if(improve){
+            connection.modifyOrder(stopId,candidate,null,null)
+                    .toCompletionStage().toCompletableFuture().get();
+            stopPrice=candidate;
+        }
+    }
+
+    private void placeStopForCurrent()throws Exception{
+        if(positionId.isEmpty()||positionVolume<=0)return;
+        double price="BUY".equals(positionSide)
+                ?positionPrice-TRAIL_PIPS*pipSize
+                :positionPrice+TRAIL_PIPS*pipSize;
+        placeStop(price);
+    }
+
+    private void placeStop(double price)throws Exception{
+        if(positionVolume<=0)return;
+        TradeOptions options=new TradeOptions();
+        options.comment="Multi-bot 100-pip opposite STOP";
+        options.clientId="MBSTOP-"+UUID.randomUUID();
+        String side="BUY".equals(positionSide)?"SELL":"BUY";
+        if("BUY".equals(side))
+            connection.createStopBuyOrder(SYMBOL,positionVolume,price,null,null,options)
+                    .toCompletionStage().toCompletableFuture().get();
+        else
+            connection.createStopSellOrder(SYMBOL,positionVolume,price,null,null,options)
+                    .toCompletionStage().toCompletableFuture().get();
+        stopSide=side; stopPrice=price; sourcePositionId=positionId;
+    }
+
+    private void closePosition(String id)throws Exception{
+        connection.closePosition(id,null).toCompletionStage().toCompletableFuture().get();
     }
 
     private void recalcVolume(){
-        if(balance>0&&pipValue>0){double raw=(balance*0.01)/(100.0*pipValue);volume=normalize(raw);}
+        if(balance>0&&pipValue>0){
+            double raw=(balance*0.01)/(TRAIL_PIPS*pipValue);
+            volume=normalize(raw);
+        }
     }
+
     private double normalize(double v){
         v=Math.max(minVolume,Math.min(maxVolume,v));
         if(volumeStep>0)v=Math.floor(v/volumeStep)*volumeStep;
         return Math.max(minVolume,Math.round(v*1000000.0)/1000000.0);
     }
-    private void enter(String side,double price)throws Exception{
-        if(volume<=0)return;
-        JSONObject t=base("trade");
-        t.put("trade",new JSONObject()
-            .put("actionType","BUY".equals(side)?"ORDER_TYPE_BUY":"ORDER_TYPE_SELL")
-            .put("symbol","XAUUSD").put("volume",volume).put("magic",MAGIC)
-            .put("clientId","MBENTRY"));
-        emit(t);
+
+    public void setTrading(boolean on){
+        trading=on;
+        getSharedPreferences("runtime",0).edit().putBoolean("trading",on).apply();
+        notifyState(on?"BOT RUNNING — live trading":"BOT STOPPED");
     }
-    private void trail(double mid)throws Exception{
-        double candidate="BUY".equals(positionSide)?mid-100*pipSize:mid+100*pipSize;
-        boolean improve="BUY".equals(positionSide)?candidate>stopPrice:candidate<stopPrice;
-        if(stopId.isEmpty()){
-            if(improve||stopPrice==0)placeStop(candidate);
-            return;
-        }
-        if(improve){
-            JSONObject t=base("trade");
-            t.put("trade",new JSONObject().put("actionType","ORDER_MODIFY").put("orderId",stopId).put("openPrice",candidate).put("magic",MAGIC));
-            emit(t); stopPrice=candidate;
-        }
+
+    private void stopEngine(){
+        running=false;trading=false;synchronizedState=false;
+        getSharedPreferences("runtime",0).edit().putBoolean("trading",false).apply();
+        executor.submit(()->{
+            try{ if(connection!=null) connection.close(); }catch(Exception ignored){}
+            try{ if(vertx!=null) vertx.close(); }catch(Exception ignored){}
+        });
+        stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();notifyState("Stopped");
     }
-    private void placeStopForCurrent()throws Exception{if(positionId.isEmpty())return;double price="BUY".equals(positionSide)?positionPrice-100*pipSize:positionPrice+100*pipSize;placeStop(price);}
-    private void placeStop(double price)throws Exception{
-        String side="BUY".equals(positionSide)?"SELL":"BUY";
-        JSONObject t=base("trade");
-        t.put("trade",new JSONObject()
-            .put("actionType","BUY".equals(side)?"ORDER_TYPE_BUY_STOP":"ORDER_TYPE_SELL_STOP")
-            .put("symbol","XAUUSD").put("volume",positionVolume>0?positionVolume:volume)
-            .put("openPrice",price).put("magic",MAGIC).put("clientId","MBSTOP"));
-        emit(t); stopSide=side; stopPrice=price; sourcePositionId=positionId;
+
+    private Object invoke(Object target,String method,Object...args){
+        if(target==null)return null;
+        try{
+            for(Method m:target.getClass().getMethods()){
+                if(!m.getName().equals(method)||m.getParameterTypes().length!=args.length)continue;
+                return m.invoke(target,args);
+            }
+        }catch(Exception ignored){}
+        return null;
     }
-    private void closePosition(String id)throws Exception{
-        if(id==null||id.isEmpty())return;
-        JSONObject t=base("trade");
-        t.put("trade",new JSONObject().put("actionType","POSITION_CLOSE_ID").put("positionId",id).put("magic",MAGIC));
-        emit(t);
+
+    private double number(Object target,String name,double fallback){
+        if(target==null)return fallback;
+        try{
+            Field f=target.getClass().getField(name);
+            Object v=f.get(target);
+            if(v instanceof Number)return ((Number)v).doubleValue();
+        }catch(Exception ignored){}
+        try{
+            Object v=invoke(target,"get"+Character.toUpperCase(name.charAt(0))+name.substring(1));
+            if(v instanceof Number)return ((Number)v).doubleValue();
+        }catch(Exception ignored){}
+        return fallback;
     }
-    public void setTrading(boolean on){trading=on;getSharedPreferences("runtime",0).edit().putBoolean("trading",on).apply();notifyState(on?"BOT RUNNING — live trading":"BOT STOPPED");}
-    private void stopEngine(){running=false;trading=false;getSharedPreferences("runtime",0).edit().putBoolean("trading",false).apply();if(socket!=null){socket.disconnect();socket.close();}stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();notifyState("Stopped");}
+
+    private String text(Object target,String name,String fallback){
+        if(target==null)return fallback;
+        try{
+            Field f=target.getClass().getField(name);
+            Object v=f.get(target);
+            if(v!=null)return String.valueOf(v);
+        }catch(Exception ignored){}
+        Object v=invoke(target,"get"+Character.toUpperCase(name.charAt(0))+name.substring(1));
+        return v==null?fallback:String.valueOf(v);
+    }
+
+    private String typeSide(String type){return type.toUpperCase(Locale.US).contains("BUY")?"BUY":"SELL";}
+    private Throwable rootCause(Throwable e){Throwable t=e;while(t.getCause()!=null&&t.getCause()!=t)t=t.getCause();return t;}
     private String fmt(double x){return Double.isNaN(x)?"—":String.format(Locale.US,"%.2f",x);}
-    private String safe(Object x){String s=String.valueOf(x);return s.length()>180?s.substring(0,180):s;}
-    @Override public void onDestroy(){if(socket!=null){socket.disconnect();socket.close();}super.onDestroy();}
+    private String safe(Object x){String s=String.valueOf(x);return s.length()>220?s.substring(0,220):s;}
+
+    @Override public void onDestroy(){
+        try{if(connection!=null)connection.close();}catch(Exception ignored){}
+        try{if(vertx!=null)vertx.close();}catch(Exception ignored){}
+        executor.shutdownNow();
+        super.onDestroy();
+    }
+
     @Override public IBinder onBind(Intent intent){return null;}
 }
