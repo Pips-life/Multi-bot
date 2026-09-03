@@ -31,12 +31,8 @@ jobs:
 
       - name: Verify hosted Android SDK
         run: |
-          echo "ANDROID_HOME=${ANDROID_HOME:-not-set}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-not-set}"
-          test -n "${ANDROID_HOME:-}" || exit 1
-          test -x "$ANDROID_HOME/platform-tools/adb" || exit 1
-          ls -la "$ANDROID_HOME/platforms" | head -20
-          ls -la "$ANDROID_HOME/build-tools" | head -20
+          test -n "${ANDROID_HOME:-}"
+          test -x "$ANDROID_HOME/platform-tools/adb"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -45,13 +41,46 @@ jobs:
       - name: Build RELEASE APK
         run: gradle assembleRelease --stacktrace
 
-      - name: Verify release APK
+      - name: Locate release APK
         run: |
-          test -s app/build/outputs/apk/release/app-release.apk
-          file app/build/outputs/apk/release/app-release.apk
-          ls -lh app/build/outputs/apk/release/app-release.apk
+          set -e
+          mkdir -p release-apk
+          APK=$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | head -n 1)
+          test -n "$APK"
+          echo "Found: $APK"
+          cp "$APK" release-apk/app-release-unsigned.apk
+          ls -lh release-apk/app-release-unsigned.apk
+
+      - name: Create stable signing key
+        run: |
+          set -e
+          keytool -genkeypair -v \
+            -keystore release-apk/pips-life-release.jks \
+            -storepass pipslife-release \
+            -keypass pipslife-release \
+            -alias pipslife \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname 'CN=Pips-life, OU=Multi-bot, O=Pips-life, L=Kenya, C=KE'
+
+      - name: Sign RELEASE APK
+        run: |
+          set -e
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
+          test -x "$APKSIGNER"
+          "$APKSIGNER" sign \
+            --ks release-apk/pips-life-release.jks \
+            --ks-pass pass:pipslife-release \
+            --key-pass pass:pipslife-release \
+            --ks-key-alias pipslife \
+            --out release-apk/app-release.apk \
+            release-apk/app-release-unsigned.apk
+          "$APKSIGNER" verify --verbose release-apk/app-release.apk
+          file release-apk/app-release.apk
+          ls -lh release-apk/app-release.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: Multi-bot-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          path: release-apk/app-release.apk
