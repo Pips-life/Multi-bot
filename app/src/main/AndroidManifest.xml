@@ -4,6 +4,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application android:theme="@style/AppTheme" android:label="Multi-bot" android:allowBackup="false" android:supportsRtl="true">
+        <!-- MetaApi Java SDK depends on Apache HttpClient APIs. Use Android's
+             supported legacy Apache library rather than the removed bootclasspath copy. -->
+        <uses-library android:name="org.apache.http.legacy" android:required="false" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
