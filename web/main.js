@@ -3,7 +3,10 @@ import MetaApi, { SynchronizationListener } from 'metaapi.cloud-sdk';
 const SYMBOL = 'XAUUSD';
 const MAGIC = 260903;
 const TRAIL_PIPS = 100;
-const RISK_FRACTION = 0.01;
+// HFM-KE XAUUSD: use the requested minimum execution size of 0.01 lot.
+// Trade entry must not depend on broker-reported monetary pip value.
+const EXECUTION_VOLUME = 0.01;
+const XAUUSD_PIP_SIZE_FALLBACK = 0.01;
 
 const $ = id => document.getElementById(id);
 const ui = {
@@ -26,15 +29,7 @@ function sideOf(x) {
 function isOurs(x) { return x && x.symbol === SYMBOL && Number(x.magic ?? MAGIC) === MAGIC; }
 function idOf(x) { return String(x?.id ?? x?.positionId ?? x?.orderId ?? ''); }
 function volumeOf(x) { return Number(x?.volume ?? 0); }
-function pipValueFromSpec(s) {
-  if (!s) return 0;
-  if (Number(s.pipValue) > 0) return Number(s.pipValue);
-  if (Number(s.tickValue) > 0 && Number(s.tickSize) > 0 && Number(s.pipSize) > 0)
-    return Number(s.tickValue) * Number(s.pipSize) / Number(s.tickSize);
-  if (Number(s.tradeTickValue) > 0 && Number(s.tradeTickSize) > 0 && Number(s.pipSize) > 0)
-    return Number(s.tradeTickValue) * Number(s.pipSize) / Number(s.tradeTickSize);
-  return 0;
-}
+
 function normalizeVolume(raw, spec) {
   const min = Number(spec?.minVolume ?? 0.01);
   const max = Number(spec?.maxVolume ?? 100);
@@ -44,14 +39,20 @@ function normalizeVolume(raw, spec) {
   v = Math.max(min, v);
   return Number(v.toFixed(6));
 }
-function currentVolume() {
+
+function brokerPipSize() {
   const spec = connection?.terminalState?.specification(SYMBOL);
-  const info = connection?.terminalState?.accountInformation;
-  const balance = Number(info?.balance ?? 0);
-  const pv = pipValueFromSpec(spec);
-  if (!spec || balance <= 0 || pv <= 0) return 0;
-  return normalizeVolume((balance * RISK_FRACTION) / (TRAIL_PIPS * pv), spec);
+  const pipSize = Number(spec?.pipSize ?? spec?.point ?? 0);
+  return pipSize > 0 ? pipSize : XAUUSD_PIP_SIZE_FALLBACK;
 }
+
+function currentVolume() {
+  // HFM-KE XAUUSD execution is explicitly configured at 0.01 lot.
+  // Do not block trading because MetaAPI does not expose pipValue/tickValue.
+  const spec = connection?.terminalState?.specification(SYMBOL);
+  return normalizeVolume(EXECUTION_VOLUME, spec || { minVolume: 0.01, maxVolume: 100, volumeStep: 0.01 });
+}
+
 function opposite(side) { return side === 'BUY' ? 'SELL' : 'BUY'; }
 function stopCandidate(side, mid, pipSize) {
   return side === 'BUY' ? mid - TRAIL_PIPS * pipSize : mid + TRAIL_PIPS * pipSize;
@@ -169,7 +170,7 @@ async function handleReversal(oldPosition, newPosition) {
 async function enter(side) {
   if (entryInFlight || currentPosition) return;
   const volume = currentVolume();
-  if (volume <= 0) { setStatus('Cannot size trade: broker pip value/specification unavailable'); return; }
+  if (volume <= 0) { setStatus('Cannot size trade: invalid XAUUSD execution volume'); return; }
   entryInFlight = true;
   try {
     const options = { comment: 'Multi-bot Velocity Expansion', clientId: `MBENTRY-${Date.now()}` };
@@ -197,9 +198,7 @@ async function placeOppositeStop(position) {
   if (!position || stopActionInFlight) return;
   stopActionInFlight = true;
   try {
-    const spec = connection.terminalState.specification(SYMBOL);
-    const pipSize = Number(spec?.pipSize ?? spec?.point ?? 0.01);
-    const price = stopCandidate(sideOf(position), Number(position.openPrice), pipSize);
+    const price = stopCandidate(sideOf(position), Number(position.openPrice), brokerPipSize());
     const volume = volumeOf(position) || currentVolume();
     if (!volume || !Number.isFinite(price)) return;
     const options = { comment: 'Multi-bot 100-pip opposite STOP', clientId: `MBSTOP-${Date.now()}` };
@@ -212,9 +211,7 @@ async function placeOppositeStop(position) {
 
 async function trail(mid) {
   if (!currentPosition || !currentStop || stopActionInFlight) return;
-  const spec = connection.terminalState.specification(SYMBOL);
-  const pipSize = Number(spec?.pipSize ?? spec?.point ?? 0.01);
-  const candidate = stopCandidate(sideOf(currentPosition), mid, pipSize);
+  const candidate = stopCandidate(sideOf(currentPosition), mid, brokerPipSize());
   const existing = Number(currentStop.openPrice ?? currentStop.currentPrice ?? 0);
   const improve = sideOf(currentPosition) === 'BUY' ? candidate > existing : candidate < existing;
   if (!improve) return;
