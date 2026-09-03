@@ -6,37 +6,17 @@ import android.content.*;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.os.Bundle;
-import android.view.*;
 import android.widget.*;
 
 public class MainActivity extends Activity {
-    EditText token, account; TextView status, price, position, stop, balance; Button save, start, stopBot, change;
-    SecureStore store;
-    private final BroadcastReceiver receiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){
-        status.setText(i.getStringExtra("text")); double p=i.getDoubleExtra("bid",Double.NaN), b=i.getDoubleExtra("balance",0), s=i.getDoubleExtra("stop",0);
-        price.setText("XAUUSD  " + (Double.isNaN(p)?"—":String.format(java.util.Locale.US,"%.2f",p)));
-        balance.setText("Balance  " + (b<=0?"—":String.format(java.util.Locale.US,"%.2f",b)));
-        position.setText("Position  " + i.getStringExtra("side")); stop.setText("Opposite STOP  " + (s<=0?"—":String.format(java.util.Locale.US,"%.2f",s)));
-    }};
-    @Override public void onCreate(Bundle b){super.onCreate(b); store=new SecureStore(this); build(); if(android.os.Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},9); load(); registerReceiver(receiver,new IntentFilter(TradingService.ACTION_STATUS), Context.RECEIVER_NOT_EXPORTED);}
+    EditText token,account;TextView status,price,position,stop,balance;Button save,start,stopBot,change;SecureStore store;
+    private final BroadcastReceiver receiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){status.setText(i.getStringExtra("text"));double p=i.getDoubleExtra("bid",Double.NaN),b=i.getDoubleExtra("balance",0),s=i.getDoubleExtra("stop",0);price.setText("XAUUSD  "+(Double.isNaN(p)?"—":String.format(java.util.Locale.US,"%.2f",p)));balance.setText("Balance  "+(b<=0?"—":String.format(java.util.Locale.US,"%.2f",b)));position.setText("Position  "+i.getStringExtra("side"));stop.setText("Opposite STOP  "+(s<=0?"—":String.format(java.util.Locale.US,"%.2f",s)));}};
+    @Override public void onCreate(Bundle b){super.onCreate(b);store=new SecureStore(this);build();if(android.os.Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},9);load();registerReceiver(receiver,new IntentFilter(TradingService.ACTION_STATUS),Context.RECEIVER_NOT_EXPORTED);}
     private TextView tv(String t,int z){TextView v=new TextView(this);v.setText(t);v.setTextColor(Color.WHITE);v.setTextSize(z);v.setPadding(0,10,0,10);return v;}
-    private void build(){
-        LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setPadding(28,28,28,28);root.setBackgroundColor(Color.rgb(15,15,15));
-        root.addView(tv("MULTI-BOT",28)); root.addView(tv("XAUUSD • tick velocity • 100-pip opposite STOP",14));
-        token=new EditText(this);token.setHint("MetaAPI token");token.setInputType(129);token.setTextColor(Color.WHITE);token.setHintTextColor(Color.GRAY);root.addView(token);
-        account=new EditText(this);account.setHint("MetaAPI account ID");account.setTextColor(Color.WHITE);account.setHintTextColor(Color.GRAY);root.addView(account);
-        save=new Button(this);save.setText("SAVE & CONNECT");root.addView(save);
-        change=new Button(this);change.setText("CHANGE CONNECTION");root.addView(change);
-        price=tv("XAUUSD  —",20);balance=tv("Balance  —",18);position=tv("Position  —",18);stop=tv("Opposite STOP  —",18);status=tv("Not connected",15);
-        root.addView(price);root.addView(balance);root.addView(position);root.addView(stop);root.addView(status);
-        start=new Button(this);start.setText("START BOT");root.addView(start);stopBot=new Button(this);stopBot.setText("STOP BOT");root.addView(stopBot);
-        setContentView(root);
-        save.setOnClickListener(v->saveCredentials()); change.setOnClickListener(v->{token.setText("");account.setText("");token.requestFocus();});
-        start.setOnClickListener(v->startBot(true)); stopBot.setOnClickListener(v->stopBot());
-    }
+    private void build(){LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setPadding(28,28,28,28);root.setBackgroundColor(Color.rgb(15,15,15));root.addView(tv("MULTI-BOT",28));root.addView(tv("XAUUSD • tick velocity • 100-pip opposite STOP",14));token=new EditText(this);token.setHint("MetaAPI token");token.setInputType(129);token.setTextColor(Color.WHITE);token.setHintTextColor(Color.GRAY);root.addView(token);account=new EditText(this);account.setHint("MetaAPI account ID");account.setTextColor(Color.WHITE);account.setHintTextColor(Color.GRAY);root.addView(account);save=new Button(this);save.setText("SAVE & CONNECT");root.addView(save);change=new Button(this);change.setText("CHANGE CONNECTION");root.addView(change);price=tv("XAUUSD  —",20);balance=tv("Balance  —",18);position=tv("Position  —",18);stop=tv("Opposite STOP  —",18);status=tv("Not connected",15);root.addView(price);root.addView(balance);root.addView(position);root.addView(stop);root.addView(status);start=new Button(this);start.setText("START BOT");root.addView(start);stopBot=new Button(this);stopBot.setText("STOP BOT");root.addView(stopBot);setContentView(root);save.setOnClickListener(v->saveCredentials());change.setOnClickListener(v->{store.clear();token.setEnabled(true);token.setText("");account.setText("");status.setText("Enter new MetaAPI credentials");token.requestFocus();});start.setOnClickListener(v->startBot(true));stopBot.setOnClickListener(v->stopBot());}
     private void load(){try{String a=store.accountId();if(!a.isEmpty()){account.setText(a);token.setText("SAVED TOKEN");token.setEnabled(false);status.setText("Credentials saved — ready");}}catch(Exception ignored){}}
     private void saveCredentials(){String t=token.getText().toString().trim(),a=account.getText().toString().trim();if(t.isEmpty()||a.isEmpty()){status.setText("Enter MetaAPI token and account ID");return;}try{store.save(a,t);token.setText("SAVED TOKEN");token.setEnabled(false);status.setText("Saved securely");startBot(false);}catch(Exception e){status.setText("Save failed: "+e.getMessage());}}
-    private void startBot(boolean trading){try{Intent i=new Intent(this,TradingService.class);i.setAction(TradingService.ACTION_START);if(android.os.Build.VERSION.SDK_INT>=26)startForegroundService(i);else startService(i);status.setText(trading?"Starting live bot…":"Connecting…");getSharedPreferences("runtime",0).edit().putBoolean("trading",trading).apply();}catch(Exception e){status.setText("Start failed: "+e.getMessage());}}
-    private void stopBot(){Intent i=new Intent(this,TradingService.class);i.setAction(TradingService.ACTION_STOP);startService(i);}
+    private void startBot(boolean trading){getSharedPreferences("runtime",0).edit().putBoolean("trading",trading).apply();try{Intent i=new Intent(this,TradingService.class);i.setAction(TradingService.ACTION_START);if(android.os.Build.VERSION.SDK_INT>=26)startForegroundService(i);else startService(i);status.setText(trading?"Starting live bot…":"Connecting…");}catch(Exception e){status.setText("Start failed: "+e.getMessage());}}
+    private void stopBot(){getSharedPreferences("runtime",0).edit().putBoolean("trading",false).apply();Intent i=new Intent(this,TradingService.class);i.setAction(TradingService.ACTION_STOP);startService(i);}
     @Override protected void onDestroy(){unregisterReceiver(receiver);super.onDestroy();}
 }
