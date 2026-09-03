@@ -1,15 +1,17 @@
 plugins { id 'com.android.application' }
 
 android { namespace 'com.pipslife.multibot'; compileSdk 35
-    defaultConfig { applicationId 'com.pipslife.multibot'; minSdk 26; targetSdk 35; versionCode 4; versionName '1.3' }
+    defaultConfig { applicationId 'com.pipslife.multibot'; minSdk 26; targetSdk 35; versionCode 5; versionName '1.4' }
     packaging {
         resources {
-            excludes += ['log4j2.xml']
+            excludes += ['log4j2.xml', 'log4j.properties']
         }
     }
 }
 
 dependencies {
-    // Official MetaApi Java SDK. This replaces the hand-written Socket.IO/WebSocket protocol.
+    // Official MetaApi Java SDK. The SDK owns the websocket streaming transport.
     implementation 'cloud.metaapi.sdk:metaapi-java-sdk:14.0.9'
+    // Required by the MetaApi Java SDK streaming listener/connection implementation.
+    implementation 'io.vertx:vertx-core:4.5.10'
 }
