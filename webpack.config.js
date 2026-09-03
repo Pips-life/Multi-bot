@@ -1,4 +1,5 @@
 const path = require('path');
+const webpack = require('webpack');
 
 module.exports = {
   entry: './web/main.js',
@@ -8,8 +9,18 @@ module.exports = {
     clean: true
   },
   resolve: {
-    extensions: ['.js']
+    extensions: ['.js'],
+    fallback: {
+      buffer: require.resolve('buffer/'),
+      process: require.resolve('process/browser')
+    }
   },
+  plugins: [
+    new webpack.ProvidePlugin({
+      Buffer: ['buffer', 'Buffer'],
+      process: 'process/browser'
+    })
+  ],
   devtool: false,
   performance: { hints: false }
 };
