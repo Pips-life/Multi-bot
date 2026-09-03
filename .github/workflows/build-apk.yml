@@ -11,6 +11,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Build MetaApi browser bundle
+        run: |
+          npm install
+          npm run build:web
+          test -s web-dist/bundle.js
+          mkdir -p app/src/main/assets
+          cp web/index.html app/src/main/assets/index.html
+          cp web-dist/bundle.js app/src/main/assets/bundle.js
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -34,5 +48,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multi-bot-debug-apk
+          name: Multi-bot-js-sdk-apk
           path: app/build/outputs/apk/debug/app-debug.apk
