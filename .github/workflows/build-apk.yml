@@ -10,17 +10,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Build MetaApi JavaScript bundle
+        run: |
+          npm install
+          npm run build:web
+          mkdir -p app/src/main/assets
+          cp web/index.html app/src/main/assets/index.html
+          cp web-dist/bundle.js app/src/main/assets/bundle.js
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: android-actions/setup-android@v3
       - name: Install Android SDK
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - run: gradle assembleDebug --stacktrace
+
+      - name: Build APK
+        run: gradle assembleDebug --stacktrace
+
       - uses: actions/upload-artifact@v4
         with:
           name: Multi-bot-debug-apk
