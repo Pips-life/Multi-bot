@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Multi-bot</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0f0f10;color:#fff;font-family:Arial,sans-serif}main{max-width:560px;margin:auto;padding:24px 20px 36px}.title{font-size:30px;font-weight:800}.sub{color:#9ca3af;margin:6px 0 22px;font-size:14px}.card{background:#19191c;border:1px solid #29292e;border-radius:16px;padding:16px;margin:12px 0}label{display:block;color:#a1a1aa;font-size:12px;margin:10px 0 6px}input{width:100%;background:#101012;color:#fff;border:1px solid #36363d;border-radius:10px;padding:13px;font-size:15px}button{width:100%;border:0;border-radius:11px;padding:14px;margin-top:10px;font-size:15px;font-weight:700}#save{background:#fff;color:#111}#change{background:#29292e;color:#fff}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.metric{background:#101012;border-radius:12px;padding:13px}.metric small{display:block;color:#8b8b95;font-size:11px}.metric strong{display:block;font-size:18px;margin-top:5px}.status{font-size:13px;color:#c4c4cc;line-height:1.4}.start{background:#fff;color:#111}.stop{background:#2b2020;color:#ffb4b4}.hidden{display:none}.warn{color:#fbbf24;font-size:12px;margin-top:10px}
+</style>
+</head>
+<body><main>
+<div class="title">MULTI-BOT</div><div class="sub">XAUUSD • tick velocity • 100-pip opposite STOP</div>
+<section class="card" id="credentials">
+<label>MetaAPI token</label><input id="token" type="password" autocomplete="off" placeholder="MetaAPI token">
+<label>MetaAPI account ID</label><input id="account" autocomplete="off" placeholder="MetaAPI account ID">
+<button id="save">SAVE & CONNECT</button><button id="change">CHANGE CONNECTION</button>
+<div class="warn">The token is stored locally on this Android device.</div>
+</section>
+<section class="card"><div class="grid">
+<div class="metric"><small>XAUUSD</small><strong id="price">—</strong></div>
+<div class="metric"><small>Balance</small><strong id="balance">—</strong></div>
+<div class="metric"><small>Position</small><strong id="position">—</strong></div>
+<div class="metric"><small>Opposite STOP</small><strong id="stop">—</strong></div>
+</div><p class="status" id="status">Not connected</p></section>
+<button class="start" id="start">START BOT</button><button class="stop" id="stop">STOP BOT</button>
+</main><script src="bundle.js"></script></body></html>
