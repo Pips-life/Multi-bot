@@ -3,8 +3,7 @@ import MetaApi, { SynchronizationListener } from 'metaapi.cloud-sdk';
 const SYMBOL = 'XAUUSD';
 const MAGIC = 260903;
 const TRAIL_PIPS = 100;
-// HFM-KE XAUUSD: use the requested minimum execution size of 0.01 lot.
-// Trade entry must not depend on broker-reported monetary pip value.
+// HFM-KE XAUUSD: requested minimum execution size is 0.01 lot.
 const EXECUTION_VOLUME = 0.01;
 const XAUUSD_PIP_SIZE_FALLBACK = 0.01;
 
@@ -26,7 +25,12 @@ function sideOf(x) {
   const t = String(x?.type ?? '').toUpperCase();
   return t.includes('BUY') ? 'BUY' : t.includes('SELL') ? 'SELL' : '';
 }
-function isOurs(x) { return x && x.symbol === SYMBOL && Number(x.magic ?? MAGIC) === MAGIC; }
+function isOurs(x) {
+  if (!x || x.symbol !== SYMBOL) return false;
+  const magic = Number(x.magic);
+  const clientId = String(x.clientId ?? '');
+  return magic === MAGIC || clientId.startsWith('MB_');
+}
 function idOf(x) { return String(x?.id ?? x?.positionId ?? x?.orderId ?? ''); }
 function volumeOf(x) { return Number(x?.volume ?? 0); }
 
@@ -46,16 +50,24 @@ function brokerPipSize() {
   return pipSize > 0 ? pipSize : XAUUSD_PIP_SIZE_FALLBACK;
 }
 
+function brokerDigits() {
+  const spec = connection?.terminalState?.specification(SYMBOL);
+  const digits = Number(spec?.digits ?? 2);
+  return Number.isFinite(digits) ? digits : 2;
+}
+
+function normalizePrice(price) {
+  return Number(Number(price).toFixed(brokerDigits()));
+}
+
 function currentVolume() {
-  // HFM-KE XAUUSD execution is explicitly configured at 0.01 lot.
-  // Do not block trading because MetaAPI does not expose pipValue/tickValue.
   const spec = connection?.terminalState?.specification(SYMBOL);
   return normalizeVolume(EXECUTION_VOLUME, spec || { minVolume: 0.01, maxVolume: 100, volumeStep: 0.01 });
 }
 
 function opposite(side) { return side === 'BUY' ? 'SELL' : 'BUY'; }
 function stopCandidate(side, mid, pipSize) {
-  return side === 'BUY' ? mid - TRAIL_PIPS * pipSize : mid + TRAIL_PIPS * pipSize;
+  return normalizePrice(side === 'BUY' ? mid - TRAIL_PIPS * pipSize : mid + TRAIL_PIPS * pipSize);
 }
 function cleanToken(value) {
   return String(value ?? '').trim().replace(/^Bearer\s+/i, '');
@@ -167,15 +179,21 @@ async function handleReversal(oldPosition, newPosition) {
   await placeOppositeStop(newPosition);
 }
 
+function tradeOptions(comment) {
+  // Keep MetaApi trade metadata within its validation limits.
+  // We use magic for bot ownership and deliberately omit clientId here.
+  return { comment, magic: MAGIC };
+}
+
 async function enter(side) {
   if (entryInFlight || currentPosition) return;
   const volume = currentVolume();
   if (volume <= 0) { setStatus('Cannot size trade: invalid XAUUSD execution volume'); return; }
   entryInFlight = true;
   try {
-    const options = { comment: 'Multi-bot Velocity Expansion', clientId: `MBENTRY-${Date.now()}` };
-    if (side === 'BUY') await connection.createMarketBuyOrder(SYMBOL, volume, null, null, options);
-    else await connection.createMarketSellOrder(SYMBOL, volume, null, null, options);
+    const options = tradeOptions('MB Velocity');
+    if (side === 'BUY') await connection.createMarketBuyOrder(SYMBOL, volume, undefined, undefined, options);
+    else await connection.createMarketSellOrder(SYMBOL, volume, undefined, undefined, options);
     setStatus(`OPEN ${side} ${volume} — installing opposite STOP…`);
     await waitForPosition(side, 5000);
     reconcile();
@@ -200,10 +218,10 @@ async function placeOppositeStop(position) {
   try {
     const price = stopCandidate(sideOf(position), Number(position.openPrice), brokerPipSize());
     const volume = volumeOf(position) || currentVolume();
-    if (!volume || !Number.isFinite(price)) return;
-    const options = { comment: 'Multi-bot 100-pip opposite STOP', clientId: `MBSTOP-${Date.now()}` };
-    if (sideOf(position) === 'BUY') await connection.createStopSellOrder(SYMBOL, volume, price, null, null, options);
-    else await connection.createStopBuyOrder(SYMBOL, volume, price, null, null, options);
+    if (!volume || !Number.isFinite(price) || price <= 0) return;
+    const options = tradeOptions('MB 100pip STOP');
+    if (sideOf(position) === 'BUY') await connection.createStopSellOrder(SYMBOL, volume, price, undefined, undefined, options);
+    else await connection.createStopBuyOrder(SYMBOL, volume, price, undefined, undefined, options);
     reconcile();
   } catch (e) { setStatus(`STOP placement failed: ${e?.message || e}`); }
   finally { stopActionInFlight = false; }
@@ -217,7 +235,7 @@ async function trail(mid) {
   if (!improve) return;
   stopActionInFlight = true;
   try {
-    await connection.modifyOrder(idOf(currentStop), candidate, null, null);
+    await connection.modifyOrder(idOf(currentStop), candidate, undefined, undefined);
     if (currentStop) currentStop.openPrice = candidate;
   } catch (e) { setStatus(`STOP trail failed: ${e?.message || e}`); }
   finally { stopActionInFlight = false; }
