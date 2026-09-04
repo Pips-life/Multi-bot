@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, fixed-sl-tp-direction-20260904 ]
   workflow_dispatch:
 
 jobs:
@@ -14,86 +14,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Improve live trailing logic
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('web/main.js')
-          s = p.read_text()
-
-          old_candidate = """function stopCandidate(side, mid, pipSize) {
-            return normalizePrice(side === 'BUY' ? mid - TRAIL_PIPS * pipSize : mid + TRAIL_PIPS * pipSize);
-          }"""
-          new_candidate = """function stopCandidate(side, mid, pipSize) {
-            return normalizePrice(side === 'BUY' ? mid - TRAIL_PIPS * pipSize : mid + TRAIL_PIPS * pipSize);
-          }
-
-          // Trailing reference uses the executable side of the quote:
-          // BUY position -> SELL STOP trails the BID by 100 pips.
-          // SELL position -> BUY STOP trails the ASK by 100 pips.
-          function liveTrailCandidate(side, bid, ask, pipSize) {
-            const reference = side === 'BUY' ? Number(bid) : Number(ask);
-            if (!Number.isFinite(reference) || reference <= 0) return NaN;
-            return normalizePrice(side === 'BUY'
-              ? reference - TRAIL_PIPS * pipSize
-              : reference + TRAIL_PIPS * pipSize);
-          }"""
-          if old_candidate not in s:
-              raise SystemExit('stopCandidate block not found')
-          s = s.replace(old_candidate, new_candidate, 1)
-
-          old_trail = """async function trail(mid) {
-            if (!currentPosition || !currentStop || stopActionInFlight) return;
-            const candidate = stopCandidate(sideOf(currentPosition), mid, brokerPipSize());
-            const existing = Number(currentStop.openPrice ?? currentStop.currentPrice ?? 0);
-            const improve = sideOf(currentPosition) === 'BUY' ? candidate > existing : candidate < existing;
-            if (!improve) return;
-            stopActionInFlight = true;
-            try {
-              await connection.modifyOrder(idOf(currentStop), candidate, undefined, undefined);
-              if (currentStop) currentStop.openPrice = candidate;
-            } catch (e) { setStatus(`STOP trail failed: ${e?.message || e}`); }
-            finally { stopActionInFlight = false; }
-          }"""
-          new_trail = """async function trail(bid, ask) {
-            if (!currentPosition || !currentStop || stopActionInFlight) return;
-            const side = sideOf(currentPosition);
-            const pipSize = brokerPipSize();
-            const candidate = liveTrailCandidate(side, bid, ask, pipSize);
-            const existing = Number(currentStop.openPrice ?? currentStop.currentPrice ?? 0);
-            if (!Number.isFinite(candidate) || candidate <= 0 || !Number.isFinite(existing) || existing <= 0) return;
-
-            // Never loosen the stop. Once price advances, keep it exactly
-            // 100 pips behind the current executable quote. Require at least
-            // one pip of improvement to avoid unnecessary broker modifications.
-            const minMove = Math.max(pipSize, 1e-10);
-            const improve = side === 'BUY'
-              ? candidate >= existing + minMove
-              : candidate <= existing - minMove;
-            if (!improve) return;
-
-            stopActionInFlight = true;
-            try {
-              await connection.modifyOrder(idOf(currentStop), candidate, undefined, undefined);
-              if (currentStop) currentStop.openPrice = candidate;
-            } catch (e) { setStatus(`STOP trail failed: ${e?.message || e}`); }
-            finally { stopActionInFlight = false; }
-          }"""
-          if old_trail not in s:
-              raise SystemExit('trail block not found')
-          s = s.replace(old_trail, new_trail, 1)
-
-          old_tick = """  await trail(mid);
-            setStatus(`Running ${sideOf(currentPosition)} | STOP ${fmt(Number(currentStop?.openPrice ?? currentStop?.currentPrice ?? 0))}`);"""
-          new_tick = """  await trail(bid, ask);
-            setStatus(`Running ${sideOf(currentPosition)} | STOP ${fmt(Number(currentStop?.openPrice ?? currentStop?.currentPrice ?? 0))}`);"""
-          if old_tick not in s:
-              raise SystemExit('onTick trail call not found')
-          s = s.replace(old_tick, new_tick, 1)
-
-          p.write_text(s)
-          PY
 
       - name: Build MetaApi browser bundle
         run: |
@@ -127,5 +47,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multi-bot-js-sdk-apk
+          name: Multi-bot-fixed-sl-tp-apk
           path: app/build/outputs/apk/debug/app-debug.apk
