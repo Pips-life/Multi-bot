@@ -23,6 +23,10 @@ jobs:
         run: |
           python3 .github/scripts/fix_credentials.py
 
+      - name: Apply executable decision and background-run fix
+        run: |
+          python3 .github/scripts/fix_execution_background.py
+
       - name: Build MetaApi browser bundle
         run: |
           npm install
