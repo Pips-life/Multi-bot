@@ -9,4 +9,5 @@ android { namespace 'com.pipslife.multibot'; compileSdk 35
     }
 }
 
-dependencies { implementation 'androidx.appcompat:appcompat:1.7.0' }
+dependencies {
+}
