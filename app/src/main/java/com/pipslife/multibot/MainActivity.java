@@ -12,8 +12,8 @@ import android.webkit.WebViewClient;
 
 /**
  * Android shell for the browser-capable MetaApi JavaScript SDK.
- * The trading connection is made directly by the JS SDK over websocket.
- * A foreground service keeps the app process alive while the bot is running.
+ * The trading WebView is deliberately kept alive while the foreground
+ * trading service is running. Leaving the screen must not stop live trading.
  */
 public class MainActivity extends Activity {
     private WebView webView;
@@ -55,17 +55,20 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
-        if (webView != null) {
-            webView.loadUrl("about:blank");
-            webView.stopLoading();
-            webView.destroy();
-            webView = null;
-        }
+        // Do NOT destroy the trading WebView here. The foreground service keeps
+        // the app process alive and the MetaApi JS stream must continue after
+        // the user leaves the screen/task. The explicit STOP BOT action is the
+        // only normal path that stops trading and its foreground service.
         super.onDestroy();
     }
 
     @Override public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) webView.goBack();
-        else super.onBackPressed();
+        if (webView != null && webView.canGoBack()) {
+            webView.goBack();
+        } else {
+            // Minimize instead of finishing the activity so the live MetaApi
+            // JavaScript connection remains active in the background.
+            moveTaskToBack(true);
+        }
     }
 }
