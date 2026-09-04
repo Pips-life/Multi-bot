@@ -20,16 +20,15 @@ missing = [item for item in required if item not in s]
 if missing:
     raise SystemExit('Current Pips-life trading source validation failed: ' + ', '.join(missing))
 
-# Add the protection ledger once per build workspace.
 needle = "let entryInFlight=false,stopActionInFlight=false,reconcileInFlight=false;"
 if "const protectedStops=new Map();" not in s:
     if needle not in s:
         raise SystemExit('Could not locate trading state declaration for protectedStops')
     s = s.replace(needle, needle + "\nconst protectedStops=new Map();", 1)
 
-# The source currently keeps trail() on one line. Match the complete function
-# by its stable boundary instead of requiring a newline before its closing brace.
-trail_pattern = r"async function trail\\(bid,ask\\)\\{.*?\\n\\}\\nasync function onTick"
+# trail() is minified onto one physical line in the current source.
+# Match the function from its signature through the stable onTick boundary.
+trail_pattern = r"async function trail\(bid,ask\)\{.*?\}\nasync function onTick"
 new_trail = '''async function trail(bid,ask){
   if(!currentPosition||stopActionInFlight||stopRequested)return;
   const side=sideOf(currentPosition),positionId=idOf(currentPosition);
@@ -41,11 +40,8 @@ new_trail = '''async function trail(bid,ask){
   const existing=side==='BUY'
     ? Math.max(brokerExisting>0?brokerExisting:0,remembered>0?remembered:0)
     : (brokerExisting>0&&remembered>0?Math.min(brokerExisting,remembered):(brokerExisting>0?brokerExisting:remembered));
-  // Capital-protection invariant: BUY SL can only increase; SELL SL can only decrease.
   const improve=side==='BUY'?candidate>existing:candidate<existing;
   if(existing>0&&!improve)return;
-  // Reserve the candidate before awaiting MetaApi so overlapping ticks cannot
-  // submit a less-protective stop while this request is in flight.
   protectedStops.set(positionId,candidate);
   stopActionInFlight=true;
   try{
@@ -66,10 +62,9 @@ new_trail = '''async function trail(bid,ask){
   }finally{stopActionInFlight=false;}
 }
 async function onTick'''
-patched, count = re.subn(trail_pattern, new_trail, s, count=1, flags=re.S)
+s, count = re.subn(trail_pattern, new_trail, s, count=1, flags=re.S)
 if count != 1:
     raise SystemExit('Could not locate existing trail() implementation at its onTick boundary')
-s = patched
 
 # Never overwrite a broker-provided initial stop.
 initial_old = "const candidate=stopCandidate(side,spot,brokerPipSize());if(!Number.isFinite(candidate)||candidate<=0)return;stopActionInFlight=true;"
