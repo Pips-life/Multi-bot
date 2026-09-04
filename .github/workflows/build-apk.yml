@@ -27,6 +27,10 @@ jobs:
         run: |
           python3 .github/scripts/fix_execution_background.py
 
+      - name: Apply candle pullback execution fix
+        run: |
+          python3 .github/scripts/fix_pullback_execution.py
+
       - name: Build MetaApi browser bundle
         run: |
           npm install
