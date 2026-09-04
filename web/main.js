@@ -17,8 +17,10 @@ let api=null,account=null,connection=null,listener=null;
 let trading=false,stopRequested=false,connecting=false,synchronized=false;
 let reconnectTimer=null,reconnectAttempt=0;
 let lastMid=NaN,lastBid=NaN,lastAsk=NaN,lastEntryAt=0;
-let currentPosition=null,currentStop=null;
-let entryInFlight=false,stopActionInFlight=false,reconcileInFlight=false;
+let positions=[];
+const positionStops=new Map();
+const stopActions=new Set();
+let entryInFlight=false,reconcileInFlight=false;
 let lastDirection='',marketBias='',pullbackActive=false;
 let candles=[];
 const eventLog=[],sessionHistory=[];
@@ -44,6 +46,7 @@ function credentialToken(){return cleanToken(ui.token.value)==='SAVED TOKEN'?cle
 function credentialAccount(){return String(ui.account.value||localStorage.getItem('metaapi.accountId')||'').trim();}
 function persistCredentials(token,accountId){localStorage.setItem('metaapi.token',token);localStorage.setItem('metaapi.accountId',accountId);try{window.AndroidBot?.saveCredentials?.(accountId,token);}catch(e){addLog(`Secure credential store unavailable: ${e?.message||e}`);}}
 function clearPersistedCredentials(){localStorage.removeItem('metaapi.token');localStorage.removeItem('metaapi.accountId');try{window.AndroidBot?.clearCredentials?.();}catch(_) {}}
+function positionList(){return positions.slice().sort((a,b)=>idOf(a).localeCompare(idOf(b)));}
 
 function candleTime(c){const t=c?.time instanceof Date?c.time:new Date(c?.time);return t.getTime();}
 function normalizeCandles(list){return (Array.isArray(list)?list:[]).filter(c=>Number.isFinite(Number(c?.open))&&Number.isFinite(Number(c?.high))&&Number.isFinite(Number(c?.low))&&Number.isFinite(Number(c?.close))&&Number.isFinite(candleTime(c))).sort((a,b)=>candleTime(a)-candleTime(b)).slice(-CANDLE_BUFFER);}
@@ -58,8 +61,7 @@ function updateBias(){
   const bullScore=(fast>slow?1:0)+(last.close>recent[0].close?1:0)+(bullishStructure?1:0);
   const bearScore=(fast<slow?1:0)+(last.close<recent[0].close?1:0)+(bearishStructure?1:0);
   const old=marketBias;
-  if(bullScore>=2&&bullScore>bearScore)marketBias='BUY';
-  else if(bearScore>=2&&bearScore>bullScore)marketBias='SELL';
+  if(bullScore>=2&&bullScore>bearScore)marketBias='BUY';else if(bearScore>=2&&bearScore>bullScore)marketBias='SELL';
   if(old&&marketBias!==old)addLog(`BIAS CHANGED ${old} → ${marketBias}`);
   return marketBias;
 }
@@ -97,7 +99,7 @@ class BotListener extends SynchronizationListener{
   }
   async onCandlesUpdated(instanceIndex,updates){const incoming=Array.isArray(updates)?updates.filter(x=>x?.symbol===SYMBOL):[];if(incoming.length){candles=normalizeCandles([...candles,...incoming]);const old=marketBias;updateBias();if(old!==marketBias&&old)addLog(`CANDLE BIAS ${old} → ${marketBias}`);renderPageData();}}
   async onPositionUpdated(instanceIndex,position){if(position?.symbol===SYMBOL)void reconcile();}
-  async onPositionRemoved(instanceIndex,positionId){void reconcile();}
+  async onPositionRemoved(instanceIndex,positionId){if(positionId){positionStops.delete(String(positionId));stopActions.delete(String(positionId));}void reconcile();}
   async onOrderUpdated(instanceIndex,order){if(order?.symbol===SYMBOL)void reconcile();}
   async onOrderCompleted(instanceIndex,order){if(order?.symbol===SYMBOL)void reconcile();}
   async onOrderFailed(instanceIndex,orderId,error){setStatus(`Order failed: ${error?.message||error}`);void reconcile();}
@@ -127,27 +129,31 @@ async function connectSdk(force=false){
   }catch(e){const msg=e?.message||String(e);try{await connection?.close();}catch(_){}try{await api?.close();}catch(_){}connection=null;account=null;api=null;synchronized=false;setStatus(`MetaApi connection failed: ${msg}`);scheduleReconnect();}
   finally{connecting=false;renderPageData();}
 }
-function scheduleReconnect(){
-  if(stopRequested)return;
-  const token=credentialToken(),accountId=credentialAccount();if(!token||!accountId)return;
-  clearTimeout(reconnectTimer);const delay=Math.min(30000,1000*Math.pow(2,reconnectAttempt++));reconnectTimer=setTimeout(()=>void connectSdk(true),delay);addLog(`Reconnect scheduled in ${Math.round(delay/1000)}s`);
-}
+function scheduleReconnect(){if(stopRequested)return;const token=credentialToken(),accountId=credentialAccount();if(!token||!accountId)return;clearTimeout(reconnectTimer);const delay=Math.min(30000,1000*Math.pow(2,reconnectAttempt++));reconnectTimer=setTimeout(()=>void connectSdk(true),delay);addLog(`Reconnect scheduled in ${Math.round(delay/1000)}s`);}
 
 async function reconcile(){
   if(reconcileInFlight||!connection?.terminalState)return;
   reconcileInFlight=true;
   try{
-    const state=connection.terminalState,positions=(state.positions||[]).filter(isOurs),staleStops=(state.orders||[]).filter(isOurs).filter(o=>String(o.type??'').toUpperCase().includes('STOP'));
+    const state=connection.terminalState;
+    const live=(state.positions||[]).filter(isOurs);
+    const liveIds=new Set(live.map(idOf));
+    for(const id of [...positionStops.keys()])if(!liveIds.has(id))positionStops.delete(id);
+    for(const id of [...stopActions])if(!liveIds.has(id))stopActions.delete(id);
+    const staleStops=(state.orders||[]).filter(isOurs).filter(o=>String(o.type??'').toUpperCase().includes('STOP'));
     for(const o of staleStops)void cancelOrder(idOf(o));
-    currentPosition=positions[0]||null;const stopPrice=Number(currentPosition?.stopLoss??0);currentStop=currentPosition?{id:idOf(currentPosition),openPrice:stopPrice}:null;
-    ui.position.textContent=currentPosition?sideOf(currentPosition):'—';ui.stop.textContent=stopPrice>0?fmt(stopPrice):'—';
-    if(currentPosition&&sideOf(currentPosition)&&!stopPrice&&!stopActionInFlight)void setInitialStop(currentPosition);renderPageData();
+    positions=live;
+    for(const p of positions){const id=idOf(p);const stopPrice=Number(p.stopLoss??0);positionStops.set(id,stopPrice>0?stopPrice:positionStops.get(id)||0);if(sideOf(p)&&!stopPrice&&!stopActions.has(id))void setInitialStop(p);}
+    const first=positionList()[0]||null;
+    ui.position.textContent=positions.length?(positions.length===1?sideOf(first):`${positions.length} OPEN`):'—';
+    ui.stop.textContent=first&&Number(positionStops.get(idOf(first))||first.stopLoss||0)>0?fmt(Number(positionStops.get(idOf(first))||first.stopLoss)):'—';
+    renderPageData();
   }finally{reconcileInFlight=false;}
 }
-function tradeOptions(side){return{comment:side==='BUY'?'MB_BUY':'MB_SELL',clientId:`MB_${side[0]}_${Date.now().toString(36)}`,magic:MAGIC};}
+function tradeOptions(side){return{comment:side==='BUY'?'MB_BUY':'MB_SELL',clientId:`MB_${side[0]}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,7)}`,magic:MAGIC};}
 
 async function enter(side,spot){
-  if(entryInFlight||currentPosition||!connection||!trading||stopRequested||!synchronized)return;
+  if(entryInFlight||!connection||!trading||stopRequested||!synchronized)return;
   if(Date.now()-lastEntryAt<ENTRY_COOLDOWN_MS)return;
   const volume=currentVolume();if(volume<=0){setStatus('ENTRY BLOCKED — invalid XAUUSD execution volume');return;}
   if(!Number.isFinite(Number(spot))||Number(spot)<=0){setStatus('ENTRY BLOCKED — invalid live XAUUSD price');return;}
@@ -155,28 +161,34 @@ async function enter(side,spot){
   try{
     const options=tradeOptions(side);if(stopRequested||!trading)return;
     if(side==='BUY')await connection.createMarketBuyOrder(SYMBOL,volume,undefined,undefined,options);else await connection.createMarketSellOrder(SYMBOL,volume,undefined,undefined,options);
-    lastEntryAt=Date.now();if(stopRequested||!trading){await reconcile();if(currentPosition)await closePositionSafe(currentPosition);return;}
-    lastDirection=side;setStatus(`OPEN ${side} ${volume} — PULLBACK/BIAS EXECUTION — applying 70-pip SL`);
-    const position=await waitForPosition(side,3000);await reconcile();if(position&&trading&&!stopRequested)await setInitialStop(position);
+    lastEntryAt=Date.now();lastDirection=side;
+    if(stopRequested||!trading){await reconcile();const newest=positionList().find(p=>sideOf(p)===side);if(newest)await closePositionSafe(newest);return;}
+    setStatus(`OPEN ${side} ${volume} — applying independent 70-pip SL`);
+    await waitForNewPosition(side,3000);
+    await reconcile();
   }catch(e){if(!stopRequested)setStatus(`Entry failed: ${e?.message||e}`);}finally{entryInFlight=false;}
 }
-async function waitForPosition(side,timeoutMs){const end=Date.now()+timeoutMs;while(Date.now()<end){await reconcile();if(currentPosition&&sideOf(currentPosition)===side)return currentPosition;await new Promise(r=>setTimeout(r,50));}return currentPosition;}
+async function waitForNewPosition(side,timeoutMs){const end=Date.now()+timeoutMs;while(Date.now()<end){await reconcile();const p=positionList().find(x=>sideOf(x)===side&&Number(positionStops.get(idOf(x))||x.stopLoss||0)<=0);if(p){await setInitialStop(p);return p;}await new Promise(r=>setTimeout(r,50));}return null;}
 async function setInitialStop(position){
-  if(!position||stopActionInFlight||!connection)return;
+  const id=idOf(position);if(!id||stopActions.has(id)||!connection||stopRequested)return;
   const side=sideOf(position),spot=side==='BUY'?Number(lastBid):Number(lastAsk);if(!Number.isFinite(spot))return;
   const candidate=stopCandidate(side,spot,brokerPipSize());if(!Number.isFinite(candidate)||candidate<=0)return;
-  stopActionInFlight=true;
-  try{await connection.modifyPosition(idOf(position),candidate,undefined);currentStop={id:idOf(position),openPrice:candidate};ui.stop.textContent=fmt(candidate);}catch(e){if(!stopRequested)setStatus(`Initial SL failed: ${e?.message||e}`);}finally{stopActionInFlight=false;}
+  stopActions.add(id);
+  try{await connection.modifyPosition(id,candidate,undefined);positionStops.set(id,candidate);const live=positions.find(p=>idOf(p)===id);if(live)live.stopLoss=candidate;ui.stop.textContent=fmt(candidate);}catch(e){if(!stopRequested)setStatus(`Initial SL failed for ${id}: ${e?.message||e}`);}finally{stopActions.delete(id);}
 }
-async function trail(bid,ask){
-  if(!currentPosition||stopActionInFlight||stopRequested||!connection)return;
-  const side=sideOf(currentPosition),spot=side==='BUY'?bid:ask,candidate=stopCandidate(side,spot,brokerPipSize()),existing=Number(currentPosition.stopLoss??currentStop?.openPrice??0),improve=side==='BUY'?candidate>existing:candidate<existing;
+async function trailPosition(position,bid,ask){
+  const id=idOf(position);if(!id||stopActions.has(id)||stopRequested||!connection)return;
+  const side=sideOf(position),spot=side==='BUY'?bid:ask,candidate=stopCandidate(side,spot,brokerPipSize());
+  const existing=Number(position.stopLoss??positionStops.get(id)??0),improve=side==='BUY'?candidate>existing:candidate<existing;
   if(!Number.isFinite(candidate)||candidate<=0||(existing>0&&!improve))return;
-  stopActionInFlight=true;try{await connection.modifyPosition(idOf(currentPosition),candidate,undefined);currentPosition.stopLoss=candidate;currentStop={id:idOf(currentPosition),openPrice:candidate};ui.stop.textContent=fmt(candidate);}catch(e){if(!stopRequested)setStatus(`SL trail failed: ${e?.message||e}`);}finally{stopActionInFlight=false;}
+  stopActions.add(id);
+  try{await connection.modifyPosition(id,candidate,undefined);positionStops.set(id,candidate);position.stopLoss=candidate;}catch(e){if(!stopRequested)addLog(`SL trail failed for ${id}: ${e?.message||e}`);}finally{stopActions.delete(id);}
 }
+async function trailAll(bid,ask){const live=positionList();if(!live.length)return;await Promise.all(live.map(p=>trailPosition(p,bid,ask)));renderPageData();}
 async function onTick(mid,bid,ask){
   if(!trading||stopRequested||!synchronized)return;
-  const previous=lastMid;lastMid=mid;if(currentPosition){await trail(bid,ask);return;}
+  const previous=lastMid;lastMid=mid;
+  if(positions.length){await trailAll(bid,ask);return;}
   if(!Number.isFinite(previous)||mid===previous)return;
   const decision=evaluateMarket(mid);
   if(decision.action==='PULLBACK'){lastDirection=marketBias;setStatus(`PULLBACK — ${marketBias} bias retained — waiting for resumption`);return;}
@@ -184,21 +196,19 @@ async function onTick(mid,bid,ask){
   if(decision.action==='ENTRY'){lastDirection=decision.side;setStatus(`VELOCITY ${decision.side} — ${decision.reason} — executing immediately`);await enter(decision.side,decision.side==='BUY'?ask:bid);}
 }
 async function cancelOrder(id){if(id&&connection){try{await connection.cancelOrder(id);}catch(_) {}}}
-async function closePositionSafe(position){if(!position||!connection)return false;try{await connection.closePosition(idOf(position));return true;}catch(e){addLog(`Close position failed: ${e?.message||e}`);return false;}}
+async function closePositionSafe(position){if(!position||!connection)return false;try{await connection.closePosition(idOf(position));return true;}catch(e){addLog(`Close position ${idOf(position)} failed: ${e?.message||e}`);return false;}}
 async function stopAllTrading(){
-  stopRequested=true;trading=false;clearTimeout(reconnectTimer);reconnectTimer=null;ui.stopBot.classList.add('active');ui.start.classList.remove('active');stopForegroundService();setStatus('STOPPING — closing all Pips-life positions and cancelling orders…');
-  try{const positions=(connection?.terminalState?.positions||[]).filter(isOurs),orders=(connection?.terminalState?.orders||[]).filter(isOurs);await Promise.all(orders.map(o=>cancelOrder(idOf(o))));await Promise.all(positions.map(p=>closePositionSafe(p)));await new Promise(r=>setTimeout(r,300));await reconcile();currentPosition=null;currentStop=null;ui.position.textContent='—';ui.stop.textContent='—';setStatus('BOT STOPPED — all Pips-life positions closed; new orders disabled');sessionHistory.unshift({time:Date.now(),text:'Bot stopped — positions closed and orders disabled'});}catch(e){setStatus(`BOT STOP ERROR — ${e?.message||e}`);}
+  stopRequested=true;trading=false;clearTimeout(reconnectTimer);reconnectTimer=null;ui.stopBot.classList.add('active');ui.start.classList.remove('active');try{window.AndroidBot?.stopForegroundBot?.();}catch(_){}setStatus('STOPPING — closing all Pips-life positions and cancelling orders…');
+  try{const live=(connection?.terminalState?.positions||[]).filter(isOurs),orders=(connection?.terminalState?.orders||[]).filter(isOurs);await Promise.all(orders.map(o=>cancelOrder(idOf(o))));await Promise.all(live.map(p=>closePositionSafe(p)));await new Promise(r=>setTimeout(r,300));await reconcile();positions=[];positionStops.clear();stopActions.clear();ui.position.textContent='—';ui.stop.textContent='—';setStatus('BOT STOPPED — all Pips-life positions closed; new orders disabled');sessionHistory.unshift({time:Date.now(),text:'Bot stopped — positions closed and orders disabled'});}catch(e){setStatus(`BOT STOP ERROR — ${e?.message||e}`);}
 }
-function startForegroundService(){try{if(window.AndroidBot?.startForegroundBot)window.AndroidBot.startForegroundBot();}catch(_) {}}
-function stopForegroundService(){try{if(window.AndroidBot?.stopForegroundBot)window.AndroidBot.stopForegroundBot();}catch(_) {}}
 function saveCredentials(){const token=cleanToken(ui.token.value),accountId=ui.account.value.trim();if(!token||token==='SAVED TOKEN'){setStatus('Enter a valid MetaAPI token');return;}if(!validAccountId(accountId)){setStatus('Enter a valid MetaAPI account ID');return;}persistCredentials(token,accountId);ui.token.value='SAVED TOKEN';ui.token.disabled=true;addLog('Credentials saved locally — encrypted Android store + WebView fallback');void connectSdk();}
-function changeCredentials(){void stopAllTrading();clearPersistedCredentials();try{connection?.close();api?.close();}catch(_){}connection=null;account=null;api=null;synchronized=false;ui.token.disabled=false;ui.token.value='';ui.account.value='';setStatus('Enter new MetaAPI credentials');}
-function startBot(){stopRequested=false;if(!connection||!synchronized){setStatus('START BLOCKED — Connect MetaApi first');return;}trading=true;startForegroundService();ui.start.classList.add('active');ui.stopBot.classList.remove('active');setStatus(`BOT RUNNING — CANDLE BIAS + PULLBACK DETECTION — 70 PIP TRAIL`);addLog(`BOT STARTED — current bias ${marketBias||'CALCULATING'}; pullbacks are traded in bias direction; structure breaks reverse bias`);}
+function changeCredentials(){void stopAllTrading();clearPersistedCredentials();try{connection?.close();api?.close();}catch(_){}connection=null;account=null;api=null;synchronized=false;positions=[];positionStops.clear();stopActions.clear();ui.token.disabled=false;ui.token.value='';ui.account.value='';setStatus('Enter new MetaAPI credentials');}
+function startBot(){stopRequested=false;if(!connection||!synchronized){setStatus('START BLOCKED — Connect MetaApi first');return;}trading=true;try{window.AndroidBot?.startForegroundBot?.();}catch(_){}ui.start.classList.add('active');ui.stopBot.classList.remove('active');setStatus(`BOT RUNNING — CANDLE BIAS + PULLBACK DETECTION — 70 PIP INDEPENDENT TRAILS`);addLog(`BOT STARTED — each open position gets its own 70-pip favorable-only SL trail`);}
 function showPage(name){['dashboard','trades','history','logs'].forEach(p=>{const el=$(`page-${p}`);if(el)el.classList.toggle('active',p===name);const nav=$(`nav-${p}`);if(nav)nav.classList.toggle('active',p===name);});renderPageData();window.scrollTo({top:0,behavior:'smooth'});}
-function renderTrades(){const el=$('tradesInfo');if(!el)return;if(!connection){el.innerHTML='<div class="empty">MetaApi is not connected.<br>Connect from Dashboard to view live trades.</div>';return;}const pos=currentPosition,stop=currentStop;el.innerHTML=`<div class="info-row"><span>Engine</span><b class="${trading?'green':''}">${trading?'RUNNING':'STOPPED'}</b></div><div class="info-row"><span>Connection</span><b>${synchronized?'CONNECTED':'RECONNECTING'}</b></div><div class="info-row"><span>Bias</span><b>${marketBias||'CALCULATING'}</b></div><div class="info-row"><span>State</span><b>${pullbackActive?'PULLBACK — WAITING RESUMPTION':'DIRECTIONAL'}</b></div><div class="info-row"><span>Entry mode</span><b>BIAS + PULLBACK VELOCITY</b></div><div class="info-row"><span>Last direction</span><b>${lastDirection||'WAITING'}</b></div><div class="info-row"><span>Symbol</span><b>${SYMBOL}</b></div><div class="info-row"><span>Position</span><b>${pos?sideOf(pos):'NONE'}</b></div><div class="info-row"><span>Volume</span><b>${pos?fmt(volumeOf(pos))+' LOT':'—'}</b></div><div class="info-row"><span>Entry</span><b>${pos?fmt(Number(pos.openPrice)):'—'}</b></div><div class="info-row"><span>Trailing SL</span><b class="red">${stop&&Number(stop.openPrice)>0?fmt(Number(stop.openPrice)):'—'}</b></div><div class="info-row"><span>Trail distance</span><b>70 PIPS</b></div>`;}
+function renderTrades(){const el=$('tradesInfo');if(!el)return;if(!connection){el.innerHTML='<div class="empty">MetaApi is not connected.<br>Connect from Dashboard to view live trades.</div>';return;}const list=positionList();let html=`<div class="info-row"><span>Engine</span><b class="${trading?'green':''}">${trading?'RUNNING':'STOPPED'}</b></div><div class="info-row"><span>Connection</span><b>${synchronized?'CONNECTED':'RECONNECTING'}</b></div><div class="info-row"><span>Bias</span><b>${marketBias||'CALCULATING'}</b></div><div class="info-row"><span>State</span><b>${pullbackActive?'PULLBACK — WAITING RESUMPTION':'DIRECTIONAL'}</b></div><div class="info-row"><span>Entry mode</span><b>BIAS + PULLBACK VELOCITY</b></div><div class="info-row"><span>Open positions</span><b>${list.length}</b></div>`;if(!list.length)html+='<div class="empty">No open Pips-life positions.</div>';else list.forEach((p,i)=>{const id=idOf(p),stop=Number(positionStops.get(id)||p.stopLoss||0);html+=`<div class="info-row"><span>Position ${i+1} • ${sideOf(p)} • ${id.slice(0,8)}</span><b>${fmt(volumeOf(p))} LOT</b></div><div class="info-row"><span>Entry</span><b>${fmt(Number(p.openPrice))}</b></div><div class="info-row"><span>Individual trailing SL</span><b class="red">${stop>0?fmt(stop):'SETTING…'}</b></div><div class="info-row"><span>Trail distance</span><b>70 PIPS</b></div>`;});el.innerHTML=html;}
 function renderHistory(){const el=$('historyInfo');if(!el)return;if(!sessionHistory.length){el.innerHTML='<div class="empty">No completed bot events in this app session yet.</div>';return;}el.innerHTML=sessionHistory.slice(0,30).map(x=>`<div class="info-row"><span>${new Date(x.time).toLocaleTimeString()}</span><b>${x.text}</b></div>`).join('');}
 function renderLogs(){const el=$('logsInfo');if(!el)return;el.innerHTML=eventLog.length?eventLog.map(x=>`<div class="log-row"><span class="log-time">${x.time.toLocaleTimeString()}</span>${String(x.text).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</div>`).join(''):'<div class="empty">No events yet.</div>';}
-function renderPageData(){const p=currentPosition,s=currentStop;if($('sideBadge')){const side=sideOf(p);$('sideBadge').textContent=side||lastDirection||'WAITING';$('sideBadge').classList.toggle('sell',side==='SELL');}if($('positionPrice'))$('positionPrice').textContent=p?fmt(Number(p.openPrice)):'—';if($('stopDetail'))$('stopDetail').textContent=s&&Number(s.openPrice)>0?fmt(Number(s.openPrice)):'—';renderTrades();renderHistory();renderLogs();}
+function renderPageData(){const list=positionList(),p=list[0]||null,s=p?Number(positionStops.get(idOf(p))||p.stopLoss||0):0;if($('sideBadge')){const side=p?sideOf(p):'';$('sideBadge').textContent=side||(list.length>1?`${list.length} OPEN`:lastDirection||'WAITING');$('sideBadge').classList.toggle('sell',side==='SELL');}if($('positionPrice'))$('positionPrice').textContent=p?fmt(Number(p.openPrice)):'—';if($('stopDetail'))$('stopDetail').textContent=s>0?fmt(s):'—';renderTrades();renderHistory();renderLogs();}
 
 ui.save.onclick=saveCredentials;ui.change.onclick=changeCredentials;ui.start.onclick=startBot;ui.stopBot.onclick=stopAllTrading;
 $('nav-dashboard').onclick=()=>showPage('dashboard');$('nav-trades').onclick=()=>showPage('trades');$('nav-history').onclick=()=>showPage('history');$('nav-logs').onclick=()=>showPage('logs');
@@ -206,4 +216,4 @@ const androidToken=(()=>{try{return cleanToken(window.AndroidBot?.getSavedToken?
 const androidAccount=(()=>{try{return String(window.AndroidBot?.getSavedAccountId?.()||'').trim();}catch(_){return '';}})();
 const savedToken=androidToken||cleanToken(localStorage.getItem('metaapi.token'));const savedAccount=androidAccount||String(localStorage.getItem('metaapi.accountId')||'').trim();
 if(savedToken&&savedAccount){localStorage.setItem('metaapi.token',savedToken);localStorage.setItem('metaapi.accountId',savedAccount);ui.token.value='SAVED TOKEN';ui.token.disabled=true;ui.account.value=savedAccount;addLog('Saved credentials found — reconnecting automatically');void connectSdk();}
-addLog('Pips-life engine loaded — candle bias + pullback/reversal detection + 70-pip favorable-only trailing');
+addLog('Pips-life engine loaded — multi-position support + independent 70-pip favorable-only SL trails');
