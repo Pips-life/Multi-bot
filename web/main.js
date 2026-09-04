@@ -7,11 +7,15 @@ const TAKE_PROFIT_PIPS = 130;
 const EXECUTION_VOLUME = 0.01;
 const XAUUSD_PIP_SIZE_FALLBACK = 0.01;
 const MAX_POSITIONS = 10;
+const RECONNECT_BASE_MS = 1500;
+const RECONNECT_MAX_MS = 15000;
+const SYNC_TIMEOUT_MS = 45000;
 
 const $ = id => document.getElementById(id);
 const ui = { token:$('token'), account:$('account'), price:$('price'), balance:$('balance'), position:$('position'), stop:$('stop'), status:$('status'), save:$('save'), change:$('change'), start:$('start'), stopBot:$('stop') };
 let api=null, account=null, connection=null, listener=null;
 let trading=false, connecting=false, synchronized=false, lastMid=NaN, entryInFlight=false, lastStatus='';
+let reconnectTimer=null, reconnectAttempt=0, connectionGeneration=0, syncStartedAt=0, subscribed=false;
 const stopByPosition=new Map();
 const tpByPosition=new Map();
 const closingPositionIds=new Set();
@@ -39,26 +43,76 @@ function orders(){return (connection?.terminalState?.orders||[]).filter(isOurs);
 function tradeOptions(comment,clientId){return {comment,magic:MAGIC,clientId};}
 function tpPrice(position){const p=Number(position.openPrice),step=TAKE_PROFIT_PIPS*brokerPipSize();return normalizePrice(sideOf(position)==='BUY'?p+step:p-step);}
 function stopPrice(position,mid){const step=TRAIL_PIPS*brokerPipSize();return normalizePrice(sideOf(position)==='BUY'?mid-step:mid+step);}
+function clearReconnectTimer(){if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null;}}
+function scheduleReconnect(reason='connection lost'){
+  if(reconnectTimer||connecting)return;
+  const delay=Math.min(RECONNECT_MAX_MS,RECONNECT_BASE_MS*Math.pow(2,reconnectAttempt++));
+  setStatus(`MetaApi ${reason} — reconnecting in ${Math.ceil(delay/1000)}s…`);
+  reconnectTimer=setTimeout(()=>{reconnectTimer=null;void connectSdk(true);},delay);
+}
+function resetReconnectBackoff(){reconnectAttempt=0;clearReconnectTimer();}
+async function safeCloseConnection(){const c=connection,a=api;connection=null;api=null;account=null;listener=null;synchronized=false;subscribed=false;try{if(c)await c.close();}catch(_){}try{if(a)await a.close();}catch(_){}}
 
 class BotListener extends SynchronizationListener{
- onConnected(){setStatus('MetaApi connected — synchronizing…');}
- onDisconnected(){synchronized=false;setStatus('MetaApi disconnected — waiting to reconnect…');}
- onSynchronizationStarted(){synchronized=false;setStatus('Synchronizing MetaApi terminal…');}
- onSynchronizationFinished(){synchronized=true;setStatus('CONNECTED — XAUUSD live stream active');reconcile();}
+ onConnected(){synchronized=false;syncStartedAt=Date.now();setStatus('MetaApi transport connected — synchronizing terminal…');}
+ onDisconnected(){synchronized=false;subscribed=false;setStatus('MetaApi transport disconnected — preserving bot state…');scheduleReconnect('disconnected');}
+ onSynchronizationStarted(){synchronized=false;syncStartedAt=Date.now();setStatus('Synchronizing MetaApi terminal state…');}
+ onSynchronizationFinished(){synchronized=true;syncStartedAt=0;resetReconnectBackoff();setStatus('CONNECTED — XAUUSD live stream active');void subscribeMarketData();void reconcile();}
  onSymbolPricesUpdated(instanceIndex,prices){const p=Array.isArray(prices)?prices.find(x=>x?.symbol===SYMBOL):(prices?.symbol===SYMBOL?prices:null);if(!p)return;const bid=Number(p.bid),ask=Number(p.ask);if(!Number.isFinite(bid)||!Number.isFinite(ask))return;const mid=(bid+ask)/2;const previous=lastMid;lastMid=mid;ui.price.textContent=fmt(mid);const info=connection?.terminalState?.accountInformation;if(info?.balance!=null)ui.balance.textContent=fmt(Number(info.balance));if(trading&&synchronized)void onTick(mid,bid,ask,previous);}
- onPositionUpdated(instanceIndex,p){if(p?.symbol===SYMBOL)reconcile();}
- onPositionRemoved(){reconcile();}
- onOrderUpdated(instanceIndex,o){if(o?.symbol===SYMBOL)reconcile();}
- onOrderCompleted(){reconcile();}
- onOrderFailed(instanceIndex,id,error){setStatus(`Order failed: ${error?.message||error}`);reconcile();}
+ onPositionUpdated(instanceIndex,p){if(p?.symbol===SYMBOL)void reconcile();}
+ onPositionRemoved(){void reconcile();}
+ onOrderUpdated(instanceIndex,o){if(o?.symbol===SYMBOL)void reconcile();}
+ onOrderCompleted(){void reconcile();}
+ onOrderFailed(instanceIndex,id,error){setStatus(`Order failed: ${error?.message||error}`);void reconcile();}
 }
 
-async function connectSdk(){
- if(connecting||connection)return;const token=cleanToken(ui.token.value),accountId=ui.account.value.trim();
- if(!token||token==='SAVED TOKEN'){setStatus('MetaAPI token is missing');return;}if(!validAccountId(accountId)){setStatus('MetaAPI account ID format is invalid');return;}
- connecting=true;setStatus('Connecting directly to MetaApi…');
- try{const C=sdkConstructor();api=new C(token);account=await api.metatraderAccountApi.getAccount(accountId);if(!account?.id)throw new Error('MetaApi account not found');if(typeof account.waitConnected==='function')await account.waitConnected();connection=account.getStreamingConnection();listener=new BotListener();connection.addSynchronizationListener(listener);await connection.connect();await connection.waitSynchronized();synchronized=true;await connection.subscribeToMarketData(SYMBOL);reconcile();setStatus('CONNECTED — XAUUSD live stream active');}
- catch(e){const msg=e?.message||String(e);try{if(connection)await connection.close();}catch(_){}try{if(api)await api.close();}catch(_){}connection=null;account=null;api=null;synchronized=false;setStatus(`MetaAPI connection failed: ${msg}`);}finally{connecting=false;}
+async function subscribeMarketData(){
+  if(!connection||!synchronized||subscribed)return;
+  try{await connection.subscribeToMarketData(SYMBOL);subscribed=true;setStatus('CONNECTED — XAUUSD live stream active');}
+  catch(e){subscribed=false;setStatus(`Market stream retry: ${e?.message||e}`);scheduleReconnect('market stream unavailable');}
+}
+
+async function waitForSynchronization(c,generation){
+  const deadline=Date.now()+SYNC_TIMEOUT_MS;
+  while(Date.now()<deadline){
+    if(generation!==connectionGeneration||c!==connection)return false;
+    if(c?.terminalState?.connected&&synchronized)return true;
+    await new Promise(r=>setTimeout(r,250));
+  }
+  throw new Error('MetaApi synchronization timeout — connection will be retried without trading');
+}
+
+async function connectSdk(isReconnect=false){
+  if(connecting||connection)return;
+  const token=cleanToken(ui.token.value),accountId=ui.account.value.trim();
+  if(!token||token==='SAVED TOKEN'){setStatus('MetaAPI token is missing');return;}
+  if(!validAccountId(accountId)){setStatus('MetaAPI account ID format is invalid');return;}
+  connecting=true;const generation=++connectionGeneration;
+  if(!isReconnect)setStatus('Connecting directly to MetaApi…');
+  try{
+    const C=sdkConstructor();
+    api=new C(token);
+    account=await api.metatraderAccountApi.getAccount(accountId);
+    if(!account?.id)throw new Error('MetaApi account not found');
+    if(typeof account.waitConnected==='function')await account.waitConnected();
+    if(generation!==connectionGeneration)throw new Error('Stale MetaApi connection attempt');
+    connection=account.getStreamingConnection();
+    listener=new BotListener();
+    connection.addSynchronizationListener(listener);
+    await connection.connect();
+    await waitForSynchronization(connection,generation);
+    await subscribeMarketData();
+    await reconcile();
+    resetReconnectBackoff();
+    setStatus('CONNECTED — XAUUSD live stream active');
+  }catch(e){
+    const msg=e?.message||String(e);
+    if(generation===connectionGeneration){
+      await safeCloseConnection();
+      setStatus(`MetaApi connection recovering: ${msg}`);
+      scheduleReconnect('connection not synchronized');
+    }
+  }finally{connecting=false;}
 }
 
 async function ensureTakeProfit(position){
@@ -84,7 +138,7 @@ async function ensureStop(position,mid){
    const clientId=`MB_STOP_${pid}`;const options=tradeOptions('MB live reversal stop',clientId);
    const result=sideOf(position)==='BUY'?await connection.createStopSellOrder(SYMBOL,volume,price,undefined,undefined,options):await connection.createStopBuyOrder(SYMBOL,volume,price,undefined,undefined,options);
    if(result?.stringCode&&result.stringCode!=='TRADE_RETCODE_DONE')throw new Error(result.message||result.stringCode);
-   await new Promise(r=>setTimeout(r,20));reconcile();
+   await new Promise(r=>setTimeout(r,20));void reconcile();
    const found=orders().find(o=>String(o.clientId??'')===clientId);
    if(found)stopByPosition.set(pid,{id:idOf(found),price,side:sideOf(position)});
  }catch(e){setStatus(`STOP placement failed for ${pid.slice(-6)}: ${e?.message||e}`);}finally{protectionInFlight.delete(`sl:${pid}`);}
@@ -98,7 +152,7 @@ async function trailPosition(position,mid){
 }
 
 async function reconcile(){
- if(!connection?.terminalState)return;const ps=positions(),os=orders();
+ if(!connection?.terminalState||!synchronized)return;const ps=positions(),os=orders();
  ui.position.textContent=ps.length?ps.map(p=>sideOf(p)).join(' + '):'—';
  const first=ps[0];const firstStop=first?stopByPosition.get(idOf(first)):null;ui.stop.textContent=firstStop?fmt(firstStop.price):'—';
  const stopOrders=os.filter(o=>String(o.type??'').toUpperCase().includes('STOP'));
@@ -108,7 +162,7 @@ async function reconcile(){
 }
 
 async function enter(side){
- if(entryInFlight||positions().length>=MAX_POSITIONS)return;const volume=currentVolume();if(volume<=0)return;entryInFlight=true;
+ if(!connection||!synchronized||entryInFlight||positions().length>=MAX_POSITIONS)return;const volume=currentVolume();if(volume<=0)return;entryInFlight=true;
  try{const cid=`MB_ENTRY_${Date.now()}`,options=tradeOptions('MB Velocity',cid);if(side==='BUY')await connection.createMarketBuyOrder(SYMBOL,volume,undefined,undefined,options);else await connection.createMarketSellOrder(SYMBOL,volume,undefined,undefined,options);lastEntrySide=side;setStatus(`OPEN ${side} ${volume} — installing 130-pip TP + reversal STOP…`);const end=Date.now()+5000;while(Date.now()<end){const ps=positions();const p=[...ps].reverse().find(x=>sideOf(x)===side&&!tpByPosition.has(idOf(x)));if(p){await ensureTakeProfit(p);await ensureStop(p,lastMid);return;}await new Promise(r=>setTimeout(r,50));}}
  catch(e){setStatus(`Entry failed: ${e?.message||e}`);}finally{entryInFlight=false;}
 }
@@ -116,7 +170,7 @@ async function enter(side){
 async function closePosition(p){const pid=idOf(p);if(!pid||closingPositionIds.has(pid))return;closingPositionIds.add(pid);try{await connection.closePosition(pid);}catch(e){const m=String(e?.message||e);if(!/not found|does not exist|closed/i.test(m))setStatus(`Close failed ${pid.slice(-6)}: ${m}`);}finally{closingPositionIds.delete(pid);}}
 
 async function onTick(mid,bid,ask,previous){
- await reconcile();const ps=positions();
+ if(!synchronized)return;await reconcile();const ps=positions();
  for(const p of ps)await trailPosition(p,mid);
  if(!ps.length){if(entryInFlight||Number.isNaN(previous)){if(Number.isNaN(previous))setStatus('Streaming XAUUSD — waiting for first movement');return;}if(previous<mid&&lastEntrySide!=='BUY')await enter('BUY');else if(previous>mid&&lastEntrySide!=='SELL')await enter('SELL');return;}
  if(previous<mid&&lastEntrySide==='SELL')await enter('BUY');else if(previous>mid&&lastEntrySide==='BUY')await enter('SELL');
@@ -126,9 +180,9 @@ async function onTick(mid,bid,ask,previous){
 async function cancelOrder(id){if(id&&connection){try{await connection.cancelOrder(id);}catch(_) {}}}
 function startForegroundService(){try{window.AndroidBot?.startForegroundBot?.();}catch(_) {}}
 function stopForegroundService(){try{window.AndroidBot?.stopForegroundBot?.();}catch(_) {}}
-function saveCredentials(){const token=cleanToken(ui.token.value),accountId=ui.account.value.trim();if(!token||token==='SAVED TOKEN'||!validAccountId(accountId)){setStatus('Enter valid MetaAPI credentials');return;}localStorage.setItem('metaapi.token',token);localStorage.setItem('metaapi.accountId',accountId);ui.token.value='SAVED TOKEN';ui.token.disabled=true;connectSdk();}
-function changeCredentials(){trading=false;stopForegroundService();localStorage.removeItem('metaapi.token');localStorage.removeItem('metaapi.accountId');if(connection)connection.close().catch(()=>{});if(api)api.close().catch(()=>{});connection=null;account=null;api=null;synchronized=false;stopByPosition.clear();tpByPosition.clear();ui.token.disabled=false;ui.token.value='';ui.account.value='';setStatus('Enter new MetaAPI credentials');}
+function saveCredentials(){const token=cleanToken(ui.token.value),accountId=ui.account.value.trim();if(!token||token==='SAVED TOKEN'||!validAccountId(accountId)){setStatus('Enter valid MetaAPI credentials');return;}localStorage.setItem('metaapi.token',token);localStorage.setItem('metaapi.accountId',accountId);ui.token.value='SAVED TOKEN';ui.token.disabled=true;void connectSdk();}
+function changeCredentials(){trading=false;stopForegroundService();resetReconnectBackoff();connectionGeneration++;void safeCloseConnection();stopByPosition.clear();tpByPosition.clear();ui.token.disabled=false;ui.token.value='';ui.account.value='';setStatus('Enter new MetaAPI credentials');}
 function startBot(){if(!connection||!synchronized){setStatus('Connect MetaApi first');return;}startForegroundService();trading=true;setStatus('BOT RUNNING — broker-side 130-pip TP + independent STOPs active');}
 function stopBot(){trading=false;stopForegroundService();setStatus('BOT STOPPED');}
 ui.save.onclick=saveCredentials;ui.change.onclick=changeCredentials;ui.start.onclick=startBot;ui.stopBot.onclick=stopBot;
-const savedToken=cleanToken(localStorage.getItem('metaapi.token')),savedAccount=String(localStorage.getItem('metaapi.accountId')||'').trim();if(savedToken&&savedAccount){ui.token.value=savedToken;ui.account.value=savedAccount;connectSdk().finally(()=>{ui.token.value='SAVED TOKEN';ui.token.disabled=true;});}
+const savedToken=cleanToken(localStorage.getItem('metaapi.token')),savedAccount=String(localStorage.getItem('metaapi.accountId')||'').trim();if(savedToken&&savedAccount){ui.token.value=savedToken;ui.account.value=savedAccount;void connectSdk().finally(()=>{ui.token.value='SAVED TOKEN';ui.token.disabled=true;});}
