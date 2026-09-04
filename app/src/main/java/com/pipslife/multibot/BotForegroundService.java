@@ -10,7 +10,7 @@ import android.os.IBinder;
 
 /**
  * Keeps the Multi-bot process in the foreground while the trading bot is running.
- * The actual MetaApi WebSocket/strategy remains in the WebView JavaScript SDK.
+ * The MetaApi WebSocket/strategy remains in the WebView JavaScript SDK.
  */
 public class BotForegroundService extends Service {
     private static final String CHANNEL_ID = "multibot_trading";
@@ -39,8 +39,8 @@ public class BotForegroundService extends Service {
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
         return builder
-                .setContentTitle("Multi-bot is running")
-                .setContentText("XAUUSD MetaApi live trading connection active")
+                .setContentTitle("Pips-life bot is running")
+                .setContentText("XAUUSD MetaApi live trading — background execution active")
                 .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
                 .setOngoing(true)
                 .setCategory(Notification.CATEGORY_SERVICE)
@@ -51,13 +51,20 @@ public class BotForegroundService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "Multi-bot trading",
+                    "Pips-life trading",
                     NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("Keeps the Multi-bot live trading connection active");
+            channel.setDescription("Keeps Pips-life live trading active in the background");
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) manager.createNotificationChannel(channel);
         }
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        // The service is explicitly configured as stopWithTask=false and is
+        // START_STICKY. Do not stop it when the user dismisses the app task.
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override
