@@ -10,33 +10,54 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
-/**
- * Android shell for the browser-capable MetaApi JavaScript SDK.
- * The trading WebView is deliberately kept alive while the foreground
- * trading service is running. Leaving the screen must not stop live trading.
- */
 public class MainActivity extends Activity {
     private WebView webView;
+    private SecureStore secureStore;
 
     public class BotBridge {
         @JavascriptInterface
         public void startForegroundBot() {
             Intent intent = new Intent(MainActivity.this, BotForegroundService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent);
-            } else {
-                startService(intent);
-            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent);
+            else startService(intent);
         }
 
         @JavascriptInterface
         public void stopForegroundBot() {
             stopService(new Intent(MainActivity.this, BotForegroundService.class));
         }
+
+        @JavascriptInterface
+        public boolean saveCredentials(String accountId, String token) {
+            try {
+                secureStore.save(accountId, token);
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public String getSavedToken() {
+            try { return secureStore.token(); }
+            catch (Exception e) { return ""; }
+        }
+
+        @JavascriptInterface
+        public String getSavedAccountId() {
+            try { return secureStore.accountId(); }
+            catch (Exception e) { return ""; }
+        }
+
+        @JavascriptInterface
+        public void clearCredentials() {
+            secureStore.clear();
+        }
     }
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        secureStore = new SecureStore(this);
         webView = new WebView(this);
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -55,20 +76,13 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
-        // Do NOT destroy the trading WebView here. The foreground service keeps
-        // the app process alive and the MetaApi JS stream must continue after
-        // the user leaves the screen/task. The explicit STOP BOT action is the
-        // only normal path that stops trading and its foreground service.
+        // Keep the foreground service independent from the Activity lifecycle.
+        // The bot is stopped only by the explicit STOP BOT action.
         super.onDestroy();
     }
 
     @Override public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            // Minimize instead of finishing the activity so the live MetaApi
-            // JavaScript connection remains active in the background.
-            moveTaskToBack(true);
-        }
+        if (webView != null && webView.canGoBack()) webView.goBack();
+        else moveTaskToBack(true);
     }
 }
