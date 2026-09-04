@@ -9,7 +9,7 @@ const XAUUSD_PIP_SIZE_FALLBACK = 0.01;
 const MAX_POSITIONS = 10;
 const RECONNECT_BASE_MS = 1500;
 const RECONNECT_MAX_MS = 15000;
-const SYNC_TIMEOUT_MS = 45000;
+const SYNC_TIMEOUT_MS = 60000;
 const METAAPI_PAIR_LIMIT = 26;
 
 const $ = id => document.getElementById(id);
@@ -78,13 +78,27 @@ async function subscribeMarketData(){
 }
 
 async function waitForSynchronization(c,generation){
-  const deadline=Date.now()+SYNC_TIMEOUT_MS;
-  while(Date.now()<deadline){
-    if(generation!==connectionGeneration||c!==connection)return false;
-    if(c?.terminalState?.connected&&synchronized)return true;
-    await new Promise(r=>setTimeout(r,250));
+  if(generation!==connectionGeneration||c!==connection)return false;
+  if(c?.terminalState?.connected&&c?.terminalState?.connectedToBroker)return true;
+  if(typeof c?.waitSynchronized!=='function'){
+    const deadline=Date.now()+SYNC_TIMEOUT_MS;
+    while(Date.now()<deadline){
+      if(generation!==connectionGeneration||c!==connection)return false;
+      if(c?.terminalState?.connected&&c?.terminalState?.connectedToBroker)return true;
+      await new Promise(r=>setTimeout(r,250));
+    }
+    throw new Error('MetaApi synchronization timeout — connection will be retried without trading');
   }
-  throw new Error('MetaApi synchronization timeout — connection will be retried without trading');
+  await Promise.race([
+    c.waitSynchronized(),
+    new Promise((_,reject)=>setTimeout(()=>reject(new Error('MetaApi synchronization timeout — connection will be retried without trading')),SYNC_TIMEOUT_MS))
+  ]);
+  if(generation!==connectionGeneration||c!==connection)return false;
+  if(!c?.terminalState?.connected)throw new Error('MetaApi stream disconnected after synchronization');
+  synchronized=true;
+  syncStartedAt=0;
+  resetReconnectBackoff();
+  return true;
 }
 
 async function connectSdk(isReconnect=false){
@@ -105,7 +119,9 @@ async function connectSdk(isReconnect=false){
     listener=new BotListener();
     connection.addSynchronizationListener(listener);
     await connection.connect();
-    await waitForSynchronization(connection,generation);
+    setStatus('MetaApi stream connected — waiting for synchronized terminal state…');
+    const ready=await waitForSynchronization(connection,generation);
+    if(!ready)return;
     await subscribeMarketData();
     await reconcile();
     resetReconnectBackoff();
