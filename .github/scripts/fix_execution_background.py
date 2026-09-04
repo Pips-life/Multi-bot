@@ -15,7 +15,8 @@ required=[
     "async function enter(side,spot)",
     "createMarketBuyOrder(SYMBOL,volume,undefined,undefined,options)",
     "createMarketSellOrder(SYMBOL,volume,undefined,undefined,options)",
-    "async function setInitialStop(position)",
+    # Accept both the original and the retry-enabled protection signature.
+    "async function setInitialStop(position",
     "async function closePositionSafe(position)",
     "async function stopAllTrading()",
     "stopRequested=true;trading=false;",
@@ -31,4 +32,4 @@ missing=[x for x in required if x not in s]
 if missing: raise SystemExit('Canonical Pips-life execution source validation failed: '+', '.join(missing))
 if 'market noise filter' in s or 'MIN_CANDLE_RANGE_PIPS' in s or 'MIN_DIRECTIONAL_EFFICIENCY' in s:
     raise SystemExit('Obsolete noise-filter gate detected in canonical execution source')
-print('Pips-life execution validated: stable MetaApi sync handling, fast volatility entries, noise filter removed, adaptive trails, background-safe stop/reconnect, and win-rate tracking.')
+print('Pips-life execution validated: stable MetaApi sync handling, fast volatility entries, independent per-position protection, background-safe stop/reconnect, and win-rate tracking.')
