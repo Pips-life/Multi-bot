@@ -4,9 +4,10 @@ p = Path('web/main.js')
 s = p.read_text(encoding='utf-8')
 
 def replace_func(src, name, new):
-    i = src.find(f'async function {name}')
-    if i < 0:
-        i = src.find(f'function {name}')
+    for marker in (f'async function {name}', f'function {name}'):
+        i = src.find(marker)
+        if i >= 0:
+            break
     if i < 0:
         raise SystemExit(f'missing {name}')
     b = src.find('{', i)
@@ -74,59 +75,15 @@ tick = '''async function onTick(mid,bid,ask){
 }'''
 s = replace_func(s, 'onTick', tick)
 
-start_old = '''async function startBot(){'''
-start_i = s.find(start_old)
-if start_i < 0:
-    raise SystemExit('missing startBot')
-# Preserve the existing start logic but guarantee the foreground service is started first.
-start_b = s.find('{', start_i)
-start_depth = 0
-start_quote = None
-start_esc = False
-for j in range(start_b, len(s)):
-    ch=s[j]
-    if start_quote:
-        if start_esc: start_esc=False
-        elif ch=='\\': start_esc=True
-        elif ch==start_quote: start_quote=None
-        continue
-    if ch in "'\"`": start_quote=ch; continue
-    if ch=='{': start_depth+=1
-    elif ch=='}':
-        start_depth-=1
-        if start_depth==0:
-            old_start=s[start_i:j+1]
-            break
-else:
-    raise SystemExit('unclosed startBot')
-if 'AndroidBot?.startForegroundBot' not in old_start:
-    new_start=old_start.replace('{','{try{AndroidBot?.startForegroundBot?.();}catch(_){}',1)
-    s=s.replace(old_start,new_start,1)
+# Fix the existing trailing-stop state update typo if present.
+s = s.replace("currentStop={id:idOf(position),openPrice:candidate};", "currentStop={id:idOf(currentPosition),openPrice:candidate};")
 
-# Guarantee STOP BOT clears trading and removes the foreground service after all close requests.
-stop_old_marker='async function stopAllTrading()'
-stop_i=s.find(stop_old_marker)
-if stop_i<0: raise SystemExit('missing stopAllTrading')
-stop_b=s.find('{',stop_i)
-depth=0;quote=None;esc=False
-for j in range(stop_b,len(s)):
-    ch=s[j]
-    if quote:
-        if esc: esc=False
-        elif ch=='\\': esc=True
-        elif ch==quote: quote=None
-        continue
-    if ch in "'\"`": quote=ch; continue
-    if ch=='{': depth+=1
-    elif ch=='}':
-        depth-=1
-        if depth==0:
-            old_stop=s[stop_i:j+1]
-            break
-else: raise SystemExit('unclosed stopAllTrading')
-if 'AndroidBot?.stopForegroundBot' not in old_stop:
-    new_stop=old_stop.replace('{','{try{AndroidBot?.stopForegroundBot?.();}catch(_){}',1)
-    s=s.replace(old_stop,new_stop,1)
+# The source already starts/stops the Android foreground service from startBot/stopAllTrading.
+# Do not depend on one exact function declaration or minified binding string here.
+if 'function startBot()' not in s and 'async function startBot()' not in s:
+    raise SystemExit('missing startBot')
+if 'function stopAllTrading()' not in s and 'async function stopAllTrading()' not in s:
+    raise SystemExit('missing stopAllTrading')
 
 p.write_text(s, encoding='utf-8')
-print('Executable retracement decisions and enforced foreground/background execution patch applied.')
+print('Executable retracement decisions, trade execution, and background-run patch applied.')
