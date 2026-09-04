@@ -10,6 +10,7 @@ const MAX_POSITIONS = 10;
 const RECONNECT_BASE_MS = 1500;
 const RECONNECT_MAX_MS = 15000;
 const SYNC_TIMEOUT_MS = 45000;
+const METAAPI_PAIR_LIMIT = 26;
 
 const $ = id => document.getElementById(id);
 const ui = { token:$('token'), account:$('account'), price:$('price'), balance:$('balance'), position:$('position'), stop:$('stop'), status:$('status'), save:$('save'), change:$('change'), start:$('start'), stopBot:$('stop') };
@@ -25,7 +26,7 @@ let lastEntrySide='';
 function setStatus(text){if(text!==lastStatus){lastStatus=text;ui.status.textContent=text;}}
 function fmt(n){return Number.isFinite(n)?Number(n).toFixed(2):'—';}
 function sideOf(x){const t=String(x?.type??'').toUpperCase();return t.includes('BUY')?'BUY':t.includes('SELL')?'SELL':'';}
-function isOurs(x){if(!x||x.symbol!==SYMBOL)return false;return Number(x.magic)===MAGIC||String(x.clientId??'').startsWith('MB_');}
+function isOurs(x){if(!x||x.symbol!==SYMBOL)return false;return Number(x.magic)===MAGIC||String(x.clientId??'').startsWith('MB_')||String(x.clientId??'').startsWith('E')||String(x.clientId??'').startsWith('S');}
 function idOf(x){return String(x?.id??x?.positionId??x?.orderId??'');}
 function volumeOf(x){return Number(x?.volume??0);}
 function positionTime(x){const t=Date.parse(String(x?.time??x?.updateTime??''));return Number.isFinite(t)?t:0;}
@@ -40,7 +41,11 @@ function validAccountId(v){return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 function sdkConstructor(){const Ctor=MetaApi?.default??MetaApi;if(typeof Ctor!=='function')throw new Error('MetaApi browser SDK constructor is unavailable');return Ctor;}
 function positions(){return (connection?.terminalState?.positions||[]).filter(isOurs);}
 function orders(){return (connection?.terminalState?.orders||[]).filter(isOurs);}
-function tradeOptions(comment,clientId){return {comment,magic:MAGIC,clientId};}
+function sanitizeMetaText(v){return String(v??'').replace(/[^A-Za-z0-9_-]/g,'');}
+function compactClientId(prefix,raw){const p=sanitizeMetaText(prefix).slice(0,2)||'M';const r=sanitizeMetaText(raw);return `${p}${r.slice(-8)}`.slice(0,12);}
+function stopClientId(positionId){return compactClientId('S',positionId);}
+function entryClientId(){return compactClientId('E',Date.now().toString(36));}
+function tradeOptions(comment,clientId){let c=sanitizeMetaText(comment).slice(0,10);let id=sanitizeMetaText(clientId).slice(0,15);if(c.length+id.length>METAAPI_PAIR_LIMIT)id=id.slice(0,Math.max(1,METAAPI_PAIR_LIMIT-c.length));return {comment:c,magic:MAGIC,clientId:id};}
 function tpPrice(position){const p=Number(position.openPrice),step=TAKE_PROFIT_PIPS*brokerPipSize();return normalizePrice(sideOf(position)==='BUY'?p+step:p-step);}
 function stopPrice(position,mid){const step=TRAIL_PIPS*brokerPipSize();return normalizePrice(sideOf(position)==='BUY'?mid-step:mid+step);}
 function clearReconnectTimer(){if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null;}}
@@ -51,7 +56,7 @@ function scheduleReconnect(reason='connection lost'){
   reconnectTimer=setTimeout(()=>{reconnectTimer=null;void connectSdk(true);},delay);
 }
 function resetReconnectBackoff(){reconnectAttempt=0;clearReconnectTimer();}
-async function safeCloseConnection(){const c=connection,a=api;connection=null;api=null;account=null;listener=null;synchronized=false;subscribed=false;try{if(c)await c.close();}catch(_){}try{if(a)await a.close();}catch(_){}}
+async function safeCloseConnection(){const c=connection,a=api;connection=null;api=null;account=null;listener=null;synchronized=false;subscribed=false;try{if(c)await c.close();}catch(_){}try{if(a)await a.close();}catch(_) {}}
 
 class BotListener extends SynchronizationListener{
  onConnected(){synchronized=false;syncStartedAt=Date.now();setStatus('MetaApi transport connected — synchronizing terminal…');}
@@ -135,7 +140,7 @@ async function ensureStop(position,mid){
  const price=stopPrice(position,mid),volume=volumeOf(position)||currentVolume();if(!volume||!Number.isFinite(price)||price<=0)return;
  protectionInFlight.add(`sl:${pid}`);
  try{
-   const clientId=`MB_STOP_${pid}`;const options=tradeOptions('MB live reversal stop',clientId);
+   const clientId=stopClientId(pid);const options=tradeOptions('REVSTOP',clientId);
    const result=sideOf(position)==='BUY'?await connection.createStopSellOrder(SYMBOL,volume,price,undefined,undefined,options):await connection.createStopBuyOrder(SYMBOL,volume,price,undefined,undefined,options);
    if(result?.stringCode&&result.stringCode!=='TRADE_RETCODE_DONE')throw new Error(result.message||result.stringCode);
    await new Promise(r=>setTimeout(r,20));void reconcile();
@@ -157,13 +162,13 @@ async function reconcile(){
  const first=ps[0];const firstStop=first?stopByPosition.get(idOf(first)):null;ui.stop.textContent=firstStop?fmt(firstStop.price):'—';
  const stopOrders=os.filter(o=>String(o.type??'').toUpperCase().includes('STOP'));
  for(const p of ps)void ensureTakeProfit(p);
- for(const p of ps){const pid=idOf(p),cid=`MB_STOP_${pid}`;const found=stopOrders.find(o=>String(o.clientId??'')===cid);if(found)stopByPosition.set(pid,{id:idOf(found),price:Number(found.openPrice??found.currentPrice??0),side:sideOf(p)});else if(!stopByPosition.has(pid)&&Number.isFinite(lastMid))void ensureStop(p,lastMid);}
+ for(const p of ps){const pid=idOf(p),cid=stopClientId(pid);const found=stopOrders.find(o=>String(o.clientId??'')===cid);if(found)stopByPosition.set(pid,{id:idOf(found),price:Number(found.openPrice??found.currentPrice??0),side:sideOf(p)});else if(!stopByPosition.has(pid)&&Number.isFinite(lastMid))void ensureStop(p,lastMid);}
  for(const [pid,state] of stopByPosition){if(!ps.some(p=>idOf(p)===pid)){void cancelOrder(state.id);stopByPosition.delete(pid);tpByPosition.delete(pid);}}
 }
 
 async function enter(side){
  if(!connection||!synchronized||entryInFlight||positions().length>=MAX_POSITIONS)return;const volume=currentVolume();if(volume<=0)return;entryInFlight=true;
- try{const cid=`MB_ENTRY_${Date.now()}`,options=tradeOptions('MB Velocity',cid);if(side==='BUY')await connection.createMarketBuyOrder(SYMBOL,volume,undefined,undefined,options);else await connection.createMarketSellOrder(SYMBOL,volume,undefined,undefined,options);lastEntrySide=side;setStatus(`OPEN ${side} ${volume} — installing 130-pip TP + reversal STOP…`);const end=Date.now()+5000;while(Date.now()<end){const ps=positions();const p=[...ps].reverse().find(x=>sideOf(x)===side&&!tpByPosition.has(idOf(x)));if(p){await ensureTakeProfit(p);await ensureStop(p,lastMid);return;}await new Promise(r=>setTimeout(r,50));}}
+ try{const cid=entryClientId(),options=tradeOptions('ENTRY',cid);if(side==='BUY')await connection.createMarketBuyOrder(SYMBOL,volume,undefined,undefined,options);else await connection.createMarketSellOrder(SYMBOL,volume,undefined,undefined,options);lastEntrySide=side;setStatus(`OPEN ${side} ${volume} — installing 130-pip TP + reversal STOP…`);const end=Date.now()+5000;while(Date.now()<end){const ps=positions();const p=[...ps].reverse().find(x=>sideOf(x)===side&&!tpByPosition.has(idOf(x)));if(p){await ensureTakeProfit(p);await ensureStop(p,lastMid);return;}await new Promise(r=>setTimeout(r,50));}}
  catch(e){setStatus(`Entry failed: ${e?.message||e}`);}finally{entryInFlight=false;}
 }
 
