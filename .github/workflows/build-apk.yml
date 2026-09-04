@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, quick-reversal-010ms ]
   workflow_dispatch:
 
 jobs:
@@ -63,16 +63,9 @@ jobs:
             const candidate = liveTrailCandidate(side, bid, ask, pipSize);
             const existing = Number(currentStop.openPrice ?? currentStop.currentPrice ?? 0);
             if (!Number.isFinite(candidate) || candidate <= 0 || !Number.isFinite(existing) || existing <= 0) return;
-
-            // Never loosen the stop. Once price advances, keep it exactly
-            // 100 pips behind the current executable quote. Require at least
-            // one pip of improvement to avoid unnecessary broker modifications.
             const minMove = Math.max(pipSize, 1e-10);
-            const improve = side === 'BUY'
-              ? candidate >= existing + minMove
-              : candidate <= existing - minMove;
+            const improve = side === 'BUY' ? candidate >= existing + minMove : candidate <= existing - minMove;
             if (!improve) return;
-
             stopActionInFlight = true;
             try {
               await connection.modifyOrder(idOf(currentStop), candidate, undefined, undefined);
