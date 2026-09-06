@@ -42,10 +42,10 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build APK
-        run: gradle assembleDebug --stacktrace
+      - name: Build signed release APK
+        run: gradle assembleRelease --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multi-bot-fixed-sl-tp-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: Multi-bot-trailing-dynamic-exit-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
