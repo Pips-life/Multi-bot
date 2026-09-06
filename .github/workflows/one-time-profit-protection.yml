@@ -1,0 +1,45 @@
+name: One-time profit protection update
+on:
+  push:
+    branches: [fixed-sl-tp-direction-20260904]
+permissions:
+  contents: write
+jobs:
+  update:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fixed-sl-tp-direction-20260904
+          fetch-depth: 0
+      - name: Apply trading protection changes
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          p = Path('web/main.js')
+          s = p.read_text()
+          s = s.replace("const PROFIT_ARM_PIPS=45;\nconst PROFIT_LOCK_PIPS=8;\nconst LOCK_STEP_1_PIPS=60;", "const COST_BUFFER_PIPS=10;\nconst BREAK_EVEN_ARM_PIPS=SPREAD_PIPS+COST_BUFFER_PIPS;\nconst LOCK_STEP_1_PIPS=60;")
+          s = s.replace("const REVERSAL_CONFIRMATIONS=3;", "const REVERSAL_CONFIRMATIONS=3;\n// Prevent rapid-fire entries/exits and give the broker/market a short cool-off.\nconst TRADE_COOLDOWN_MS=3000;\nlet lastTradeActionAt=0;")
+          s = s.replace("function protectedStop(position,current){const side=sideOf(position),pips=profitPips(position,current),pip=brokerPipSize();if(!side||!Number.isFinite(pips)||!Number.isFinite(pip))return undefined;if(pips<PROFIT_ARM_PIPS)return trailingStop(side,current);let protect=PROFIT_LOCK_PIPS;if(pips>=LOCK_STEP_2_PIPS)protect=LOCK_STEP_2_PROTECT_PIPS;else if(pips>=LOCK_STEP_1_PIPS)protect=LOCK_STEP_1_PROTECT_PIPS;const open=Number(position.openPrice);return normalizePrice(side==='BUY'?open+protect*pip:open-protect*pip);}", "function protectedStop(position,current){const side=sideOf(position),pips=profitPips(position,current),pip=brokerPipSize();if(!side||!Number.isFinite(pips)||!Number.isFinite(pip))return undefined;if(pips<BREAK_EVEN_ARM_PIPS)return trailingStop(side,current);const open=Number(position.openPrice);let protect=0;if(pips>=LOCK_STEP_2_PIPS)protect=LOCK_STEP_2_PROTECT_PIPS;else if(pips>=LOCK_STEP_1_PIPS)protect=LOCK_STEP_1_PROTECT_PIPS;return normalizePrice(side==='BUY'?open+protect*pip:open-protect*pip);}")
+          s = s.replace("async function closePosition(position,reason){const id=idOf(position);if(!id||!connection)return;try{await connection.closePosition(id);setStatus(`CLOSE ${sideOf(position)} — ${reason}`);}", "async function closePosition(position,reason){const id=idOf(position);if(!id||!connection)return;try{await connection.closePosition(id);lastTradeActionAt=Date.now();setStatus(`CLOSE ${sideOf(position)} — ${reason}`);}")
+          s = s.replace("async function enter(side,bid,ask){const positions=ownedPositions();if(entryInFlight||positions.length>=MAX_POSITIONS||!connection||!synchronized||!positionDistanceAllows(side,positions))return;", "async function enter(side,bid,ask){const positions=ownedPositions();if(entryInFlight||positions.length>=MAX_POSITIONS||!connection||!synchronized||!positionDistanceAllows(side,positions))return;if(Date.now()-lastTradeActionAt<TRADE_COOLDOWN_MS){setStatus(`COOL-OFF ${Math.max(0,TRADE_COOLDOWN_MS-(Date.now()-lastTradeActionAt))}ms before next trade`);return;}")
+          s = s.replace("lastEntryPrice=reference;setStatus(`OPEN ${side} ${volume} — SPREAD-AWARE PROFIT LOCK`);", "lastEntryPrice=reference;lastTradeActionAt=Date.now();setStatus(`OPEN ${side} ${volume} — 3s COOL-OFF | BE @ ${BREAK_EVEN_ARM_PIPS}p | PROFIT LOCK`);")
+          s = s.replace("const protectedProfit=Number.isFinite(weakestProfit)&&weakestProfit>=PROFIT_ARM_PIPS;", "const protectedProfit=Number.isFinite(weakestProfit)&&weakestProfit>=BREAK_EVEN_ARM_PIPS;")
+          s = s.replace("'ARMED':'WAIT '+PROFIT_ARM_PIPS+'p'", "'ARMED':'WAIT '+BREAK_EVEN_ARM_PIPS+'p'")
+          s = s.replace("| spread ${SPREAD_PIPS}p | profit lock ${PROFIT_ARM_PIPS}p", "| spread ${SPREAD_PIPS}p | BE ${BREAK_EVEN_ARM_PIPS}p | profit lock")
+          p.write_text(s)
+
+          g = Path('app/build.gradle')
+          gs = g.read_text()
+          gs = gs.replace("versionCode 12; versionName '2.1'", "versionCode 13; versionName '2.2'")
+          g.write_text(gs)
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web/main.js app/build.gradle
+          git diff --cached --quiet && exit 0
+          git commit -m "Add 3s trade cooldown and break-even profit protection"
+          git push origin fixed-sl-tp-direction-20260904
