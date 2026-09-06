@@ -43,9 +43,14 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build signed release APK
-        run: gradle assembleRelease --stacktrace
+        run: |
+          gradle clean assembleRelease --stacktrace
+          test -f app/build/outputs/apk/release/app-release.apk
+          test ! -f app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/release/app-release.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: Multi-bot-trailing-dynamic-exit-release-apk
           path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
