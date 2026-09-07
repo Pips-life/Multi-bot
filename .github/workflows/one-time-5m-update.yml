@@ -1,0 +1,36 @@
+name: One-time 5m update
+on:
+  workflow_dispatch:
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update strategy timeframe and release version
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('web/main.js')
+          s=p.read_text()
+          old='const CANDLE_MS=60000;'
+          new='const CANDLE_MS=300000;'
+          if old not in s:
+              raise SystemExit('CANDLE_MS=60000 not found; refusing to modify')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+
+          p=Path('app/build.gradle')
+          s=p.read_text()
+          if "versionCode 14" not in s or "versionName '2.3'" not in s:
+              raise SystemExit('Expected release version 2.3/versionCode 14 not found; refusing to modify')
+          s=s.replace('versionCode 14','versionCode 15',1).replace("versionName '2.3'","versionName '2.4'",1)
+          p.write_text(s)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add web/main.js app/build.gradle
+          git commit -m 'Use 5-minute execution timeframe and release v2.4'
+          git push
