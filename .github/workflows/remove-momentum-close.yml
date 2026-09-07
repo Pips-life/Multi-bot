@@ -1,0 +1,32 @@
+name: Remove momentum close
+on:
+  push:
+    branches: [ fixed-sl-tp-direction-20260904 ]
+permissions:
+  contents: write
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fixed-sl-tp-direction-20260904
+      - name: Remove quick momentum close
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('web/main.js')
+          s=p.read_text()
+          old="if(momentumFaded(heldSide)){await closeOurs(`MOMENTUM CHANGED ${heldSide}`);reversalCounts.clear();return;}else{reversalCounts.delete(heldSide);setStatus(`HOLDING ${positions.length}/${MAX_POSITIONS} ${heldSide} | MOMENTUM HOLDS | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);"
+          new="if(false){return;}else{reversalCounts.delete(heldSide);setStatus(`HOLDING ${positions.length}/${MAX_POSITIONS} ${heldSide} | MOMENTUM HOLDS | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);"
+          if old not in s: raise SystemExit('momentum close pattern not found')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+      - name: Commit change
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add web/main.js
+          git commit -m 'Remove quick close on momentum reversal'
+          git push origin fixed-sl-tp-direction-20260904
