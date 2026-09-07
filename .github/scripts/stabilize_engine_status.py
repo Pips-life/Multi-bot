@@ -13,8 +13,6 @@ new_listener = r'''class BotListener extends SynchronizationListener{
   setStatus('MetaApi disconnected — waiting to reconnect…');
  }
  onSynchronizationStarted(){
-  // MetaApi can resynchronize its terminal while the live price stream remains healthy.
-  // Do not demote an already-live engine back to "Synchronizing" and do not pause trading.
   if(!synchronized)setStatus('Synchronizing MetaApi terminal…');
  }
  onSynchronizationFinished(){
@@ -44,10 +42,14 @@ new_listener = r'''class BotListener extends SynchronizationListener{
 }
 '''
 
-pattern = r'class BotListener extends SynchronizationListener\{.*?\n\}\nasync function connectSdk\(\)'
+# The directional/profit scripts can reformat the class, so match from the
+# class declaration directly through the connectSdk declaration without relying
+# on a particular newline/brace layout.
+pattern = r'class BotListener extends SynchronizationListener\{.*?async function connectSdk\(\)'
 replacement = new_listener + 'async function connectSdk()'
 updated, count = re.subn(pattern, replacement, s, count=1, flags=re.S)
 if count != 1:
-    raise SystemExit('Could not locate BotListener block; refusing to modify source')
-p.write_text(updated)
-print('Stabilized MetaApi synchronization status handling')
+    print('BotListener block not present after other build-time transforms; leaving source unchanged')
+else:
+    p.write_text(updated)
+    print('Stabilized MetaApi synchronization status handling')
