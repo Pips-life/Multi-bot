@@ -1,3 +1,3 @@
 # Multi-bot
 
-Build trigger: broker-validation-safe release APK
+Build trigger: broker-validation-safe release APK + monotonic updater
