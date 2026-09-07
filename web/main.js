@@ -11,7 +11,7 @@ const HISTORY_SIZE=40;
 const FAST_EMA=8;
 const SLOW_EMA=21;
 const MIN_ENTRY_SPACING_PIPS=35;
-const CANDLE_MS=60000;
+const CANDLE_MS=300000;
 const MOMENTUM_WINDOW=3;
 // Broker spread is approximately 35 pips. Profit protection is deliberately
 // armed only after the trade has cleared the spread, then locks profit in stages.
