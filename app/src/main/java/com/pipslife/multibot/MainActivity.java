@@ -29,9 +29,11 @@ import java.util.regex.Pattern;
 /** Android shell for the browser-capable MetaApi JavaScript SDK. */
 public class MainActivity extends Activity {
     private static final String RELEASE_API = "https://api.github.com/repos/Pips-life/Multi-bot/releases/latest";
-    private static final String APK_NAME = "Pips-life-Multi-bot.apk";
+    private static final String APK_PREFIX = "Pips-life-Multi-bot-update-";
     private WebView webView;
     private long downloadId = -1L;
+    private String pendingApkUrl;
+    private long pendingVersion = -1L;
     private BroadcastReceiver downloadReceiver;
 
     public class BotBridge {
@@ -62,6 +64,21 @@ public class MainActivity extends Activity {
         setContentView(webView);
         webView.loadUrl("file:///android_asset/index.html");
         checkForUpdate();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (pendingApkUrl != null && canInstallPackages()) {
+            String url = pendingApkUrl;
+            long version = pendingVersion;
+            pendingApkUrl = null;
+            pendingVersion = -1L;
+            downloadAndInstall(url, version);
+        }
+    }
+
+    private boolean canInstallPackages() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.O || getPackageManager().canRequestPackageInstalls();
     }
 
     private void checkForUpdate() {
@@ -102,28 +119,35 @@ public class MainActivity extends Activity {
                 .setTitle("Pips-life update available")
                 .setMessage("A newer release is ready. Update now to keep the app current. Your saved MetaApi credentials stay in app storage.")
                 .setNegativeButton("Later", null)
-                .setPositiveButton("Update now", (d, w) -> downloadAndInstall(apkUrl))
+                .setPositiveButton("Update now", (d, w) -> {
+                    if (!canInstallPackages()) {
+                        pendingApkUrl = apkUrl;
+                        pendingVersion = remoteVersion;
+                        try {
+                            startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                    Uri.parse("package:" + getPackageName())));
+                        } catch (Exception ignored) { }
+                    } else {
+                        downloadAndInstall(apkUrl, remoteVersion);
+                    }
+                })
                 .show();
     }
 
-    private void downloadAndInstall(String apkUrl) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
-            try {
-                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        Uri.parse("package:" + getPackageName())));
-            } catch (Exception ignored) { }
-            return;
-        }
-
+    private void downloadAndInstall(String apkUrl, long remoteVersion) {
         DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        String fileName = APK_PREFIX + remoteVersion + ".apk";
         DownloadManager.Request req = new DownloadManager.Request(Uri.parse(apkUrl));
         req.setTitle("Pips-life update");
-        req.setDescription("Downloading the latest Pips-life Multi-bot release");
+        req.setDescription("Downloading Pips-life Multi-bot " + remoteVersion);
         req.setMimeType("application/vnd.android.package-archive");
         req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-        req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, APK_NAME);
+        req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
         downloadId = dm.enqueue(req);
 
+        if (downloadReceiver != null) {
+            try { unregisterReceiver(downloadReceiver); } catch (Exception ignored) { }
+        }
         downloadReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
                 if (!DownloadManager.ACTION_DOWNLOAD_COMPLETE.equals(intent.getAction())) return;
