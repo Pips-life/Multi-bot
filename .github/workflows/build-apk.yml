@@ -33,6 +33,7 @@ jobs:
           tail -8 app/build.gradle
 
       - name: Configure persistent release signing when available
+        continue-on-error: true
         env:
           PIPSLIFE_KEYSTORE_BASE64: ${{ secrets.PIPSLIFE_KEYSTORE_BASE64 }}
           PIPSLIFE_KEYSTORE_PASSWORD: ${{ secrets.PIPSLIFE_KEYSTORE_PASSWORD }}
