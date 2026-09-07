@@ -54,3 +54,6 @@ s=s.replace("onOrderCompleted(){reconcile();}", "onOrderCompleted(instanceIndex,
 s=s.replace("SL ${INITIAL_SL_PIPS}p | MOMENTUM EXIT", "100p OPPOSITE TRAIL")
 s=s.replace("MOMENTUM EXIT", "100p OPPOSITE TRAIL")
 p.write_text(s)
+
+import subprocess
+subprocess.run(['python3','.github/scripts/fix_opposite_stop_execution.py'],check=True)
