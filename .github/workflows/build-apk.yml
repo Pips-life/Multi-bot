@@ -14,6 +14,11 @@ jobs:
       - name: Apply latest trading management
         run: python3 .github/scripts/apply_profit_momentum.py
 
+      - name: Repair release Gradle file
+        run: |
+          printf '\n}\n' >> app/build.gradle
+          tail -8 app/build.gradle
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
