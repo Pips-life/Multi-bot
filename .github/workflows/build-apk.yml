@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply latest trading management
+      - name: Apply latest trading management — per-position 100 pip opposite-stop trail
         run: python3 .github/scripts/apply_profit_momentum.py
 
       - name: Apply broker-validation-safe individual entries
@@ -29,8 +29,15 @@ jobs:
       - name: Update daily gain P/L display
         run: python3 .github/scripts/update_daily_pnl_ui.py
 
-      - name: Enforce per-position 200 pip SL and -100 pip adverse momentum exits
-        run: python3 .github/scripts/enforce_per_position_risk.py
+      - name: Verify opposite-stop trail is still present before bundling
+        run: |
+          grep -q "OPPOSITE_STOP_TRAIL_PIPS=100" web/main.js
+          grep -q "oppositeTrailOrders" web/main.js
+          grep -q "handleTriggeredTrail" web/main.js
+          grep -q "createStopBuyOrder" web/main.js
+          grep -q "createStopSellOrder" web/main.js
+          grep -q "closePosition(sourceId)" web/main.js
+          echo "Verified: per-position opposite-stop trail and immediate reversal handler are present in source"
 
       - name: Set monotonic release version
         run: |
@@ -82,6 +89,14 @@ jobs:
           mkdir -p app/src/main/assets
           cp web/index.html app/src/main/assets/index.html
           cp web-dist/bundle.js app/src/main/assets/bundle.js
+          echo "Checking generated bundle for opposite-stop trail"
+          grep -q "OPPOSITE_STOP_TRAIL_PIPS" app/src/main/assets/bundle.js
+          grep -q "oppositeTrailOrders" app/src/main/assets/bundle.js
+          grep -q "handleTriggeredTrail" app/src/main/assets/bundle.js
+          grep -q "createStopBuyOrder" app/src/main/assets/bundle.js
+          grep -q "createStopSellOrder" app/src/main/assets/bundle.js
+          grep -q "closePosition(sourceId)" app/src/main/assets/bundle.js
+          echo "Verified: opposite-stop trail is present in Android bundle"
 
       - uses: actions/setup-java@v5
         with:
@@ -117,7 +132,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multi-bot-trailing-dynamic-exit-release-apk
+          name: Multi-bot-opposite-stop-trail-release-apk
           path: Pips-life-Multi-bot.apk
           if-no-files-found: error
 
@@ -129,5 +144,5 @@ jobs:
           gh release create "$TAG" Pips-life-Multi-bot.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "Pips-life Multi-bot 2.10 (${VERSION_CODE})" \
-            --notes "Per-position risk: every open position is independently protected at -200 pips. At -100 pips, that position closes only when adverse momentum is growing; if adverse momentum has faded/neutralized, it is held and remains protected by the -200 pip SL. Daily gain P/L UI: amount and percentage versus day-start account balance. Candle-size directional judgement, large-candle retracement entries, +100-pip momentum exits, and dynamic momentum SL locking. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}. Persistent release signing enforced. Engine status stabilized during MetaApi resynchronization." \
+            --notes "Per-position 100-pip opposite-stop trailing system. Every open position gets its own opposite stop 100 pips behind current price. When that stop triggers, the old position is closed immediately with no intentional delay and the triggered opposite position becomes the running trade with its own trail. No fixed TP or legacy -100/-200 momentum exit is applied. Broker-side stop orders provide the reversal trigger; actual broker/network latency cannot be guaranteed at 0.1 ms. Persistent release signing enforced so the APK updates over the installed app. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}." \
             --latest
