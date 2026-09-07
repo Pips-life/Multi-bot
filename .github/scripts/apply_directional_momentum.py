@@ -34,8 +34,17 @@ new_finalize = r'''function finalizeCandle(){
   const displaced=!!candle.side&&largeRange&&directionalBody&&directionalShare>=0.5;
 
   if(displaced){
+    // A displacement is also a profit-taking event. Snapshot positions that are
+    // open at the displacement so any already-profitable trades can be closed
+    // on the very next tick, before the normal post-displacement retracement
+    // has a chance to reclaim their profit. New positions opened afterwards
+    // are not included in this snapshot.
+    const ids=typeof ownedPositions==='function'
+      ? ownedPositions().map(p=>idOf(p)).filter(Boolean)
+      : [];
+    pendingDisplacementProfitTake={ids,side:candle.side,start:candle.start};
     activeImpulse={...candle,age:0};
-    setStatus(`DISPLACEMENT ${candle.side} — watching retracement without changing bias`);
+    setStatus(`DISPLACEMENT ${candle.side} — taking existing profits before retracement`);
   }else if(activeImpulse){
     activeImpulse.age++;
   }
@@ -161,6 +170,34 @@ new_tick = r'''function adaptiveMomentumState(side){
   return {total,recent,prior,acceleration,scale,aligned,adverse,accelerationAgainst,strength};
 }
 
+function positionProfitPips(position,bid,ask){
+  const side=sideOf(position);
+  const entry=Number(position?.openPrice);
+  const pip=brokerPipSize();
+  const current=side==='BUY'?Number(bid):Number(ask);
+  if(!side||!Number.isFinite(entry)||!Number.isFinite(current)||!Number.isFinite(pip)||pip<=0)return NaN;
+  return side==='BUY'?(current-entry)/pip:(entry-current)/pip;
+}
+
+async function takeDisplacementProfits(bid,ask){
+  const pending=pendingDisplacementProfitTake;
+  if(!pending||!Array.isArray(pending.ids)||!pending.ids.length)return false;
+  pendingDisplacementProfitTake=null;
+  let closed=false;
+  for(const position of ownedPositions()){
+    const id=idOf(position);
+    if(!id||!pending.ids.includes(id))continue;
+    const profitPips=positionProfitPips(position,bid,ask);
+    // Only close trades that are still profitable. If spread temporarily
+    // removes the profit, leave the position under its normal management.
+    if(Number.isFinite(profitPips)&&profitPips>0){
+      await closePosition(position,`+${profitPips.toFixed(0)}p — displacement profit take before reclamation`);
+      closed=true;
+    }
+  }
+  return closed;
+}
+
 async function manageOnePosition(position,bid,ask){
   const side=sideOf(position);
   const entry=Number(position?.openPrice);
@@ -189,7 +226,6 @@ async function manageOnePosition(position,bid,ask){
 
   // Begin profit protection before +100 so a winning move is not allowed to
   // travel all the way back to entry before the momentum exit activates.
-  // +100 remains the full momentum/maximise zone.
   if(profitPips>=70){
     const fading=!m.aligned||m.strength<0.5;
     const reversing=m.adverse&&m.accelerationAgainst&&Math.abs(m.recent)>=Math.abs(m.prior);
@@ -222,6 +258,12 @@ async function onTick(mid,bid,ask,previous){
     return;
   }
 
+  // Profit-taking has first priority after every detected displacement. This
+  // intentionally runs before new entries and before normal trailing logic so
+  // an existing winner is banked before the post-displacement reclamation.
+  const displacementClosed=await takeDisplacementProfits(bid,ask);
+  if(displacementClosed){reconcile();return;}
+
   const positions=[...ownedPositions()];
   let closed=false;
   for(const position of positions){
@@ -237,5 +279,14 @@ async function onTick(mid,bid,ask,previous){
 }
 '''
 s = s[:start] + new_tick + s[end:]
+
+# The state is created in web/main.js by earlier build-time scripts. Add a
+# defensive declaration only if the target file does not already define it.
+if 'pendingDisplacementProfitTake' not in s.split('function finalizeCandle(){',1)[0]:
+    marker='let activeImpulse=null;'
+    if marker in s:
+        s=s.replace(marker,marker+'\nlet pendingDisplacementProfitTake=null;',1)
+    else:
+        s='let pendingDisplacementProfitTake=null;\n'+s
 
 p.write_text(s)
