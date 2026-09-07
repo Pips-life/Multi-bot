@@ -93,6 +93,10 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build signed release APK
+        env:
+          PIPSLIFE_KEYSTORE_PASSWORD: ${{ secrets.PIPSLIFE_KEYSTORE_PASSWORD }}
+          PIPSLIFE_KEY_ALIAS: ${{ secrets.PIPSLIFE_KEY_ALIAS }}
+          PIPSLIFE_KEY_PASSWORD: ${{ secrets.PIPSLIFE_KEY_PASSWORD }}
         run: |
           gradle clean assembleRelease --stacktrace
           test -f app/build/outputs/apk/release/app-release.apk
