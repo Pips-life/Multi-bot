@@ -20,6 +20,9 @@ jobs:
       - name: Apply broker-validation-safe individual entries
         run: python3 .github/scripts/fix_individual_entries.py
 
+      - name: Apply candle-size directional momentum model
+        run: python3 .github/scripts/apply_directional_momentum.py
+
       - name: Set monotonic release version
         run: |
           VERSION_CODE=$((100000 + GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
@@ -108,5 +111,5 @@ jobs:
           gh release create "$TAG" Pips-life-Multi-bot.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "Pips-life Multi-bot 2.10 (${VERSION_CODE})" \
-            --notes "Broker-validation-safe individual entries, dynamic momentum exit, persistent updater versioning, and in-app updater. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}." \
+            --notes "Candle-size directional judgement, large-candle retracement entries, individual 200-pip protective SLs, dynamic momentum SL locking, and momentum-based dynamic TP exits. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}." \
             --latest
