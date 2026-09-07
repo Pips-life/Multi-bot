@@ -3,6 +3,14 @@ from pathlib import Path
 p = Path('web/main.js')
 s = p.read_text()
 
+# MetaApi accounts configured with manualTrades=true require magic=0 on trades.
+# The previous build forced MAGIC=260904, which can produce MetaApi Validation
+# failed before a market order reaches the broker. Use the account's configured
+# magic for position ownership instead of assuming the strategy magic.
+old_is_ours = "function isOurs(x){return !!x&&x.symbol===SYMBOL&&(Number(x.magic)===MAGIC||String(x.clientId??'').startsWith('MB_'));}"
+new_is_ours = "function isOurs(x){if(!x||x.symbol!==SYMBOL)return false;const accountMagic=Number(account?.magic);const allowedMagic=Number.isFinite(accountMagic)?accountMagic:(account?.manualTrades===true?0:MAGIC);return Number(x.magic)===allowedMagic||String(x.clientId??'').startsWith('MB_');}"
+s = s.replace(old_is_ours,new_is_ours)
+
 start = s.index("async function enter(side,bid,ask){")
 end = s.index("async function waitForPosition", start)
 
@@ -24,10 +32,10 @@ new_enter = r'''async function enter(side,bid,ask){
   let opened=0;
 
   try{
-    // Submit the broker-minimal market request: symbol + volume only.
-    // Do not send magic/clientId/comment or SL/TP on the initial request.
-    // This isolates broker execution from optional validation fields. The
-    // protective 200-pip SL is attached only after the actual fill is known.
+    // Use the broker-minimal market request. No strategy magic, clientId,
+    // comment, SL or TP is sent on the initial order. MetaApi documents that
+    // accounts using manualTrades require magic=0; forcing our own magic can
+    // therefore cause a Validation failed response before execution.
     for(let i=0;i<slots;i++){
       const positions=ownedPositions();
       if(positions.length>=MAX_POSITIONS)break;
@@ -50,7 +58,6 @@ new_enter = r'''async function enter(side,bid,ask){
       }
 
       try{
-        // Minimal market order: no optional broker validation fields.
         if(side==='BUY') await connection.createMarketBuyOrder(SYMBOL,volume);
         else await connection.createMarketSellOrder(SYMBOL,volume);
 
@@ -64,6 +71,8 @@ new_enter = r'''async function enter(side,bid,ask){
         const filledPrice=Number(position.openPrice)||entryPrice;
         lastEntryPrice=filledPrice;
 
+        // Attach the requested 200-pip protective SL only after the broker has
+        // supplied the actual fill price. Retry briefly for terminal sync lag.
         const stopLoss=initialStop(side,filledPrice);
         if(Number.isFinite(stopLoss)){
           let slApplied=false;
@@ -74,9 +83,7 @@ new_enter = r'''async function enter(side,bid,ask){
             }catch(slError){
               if(attempt===3){
                 setStatus(`OPEN ${side} ${opened}/${slots} — SL placement rejected after 3 attempts: ${slError?.message||slError}`);
-              }else{
-                await new Promise(r=>setTimeout(r,250*attempt));
-              }
+              }else await new Promise(r=>setTimeout(r,250*attempt));
             }
           }
         }
