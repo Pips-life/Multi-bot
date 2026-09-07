@@ -43,24 +43,12 @@ jobs:
     const favorableMomentum=heldSide==='BUY'?deltaSum>0:deltaSum<0;
     const adverseMomentum=heldSide==='BUY'?deltaSum<0:deltaSum>0;
     if(pnlPips>=PROFIT_MANAGEMENT_PIPS){
-      if(favorableMomentum){
-        setStatus(`PROFIT ${pnlPips.toFixed(0)}p — ${heldSide} momentum growing | HOLD`);
-      }else{
-        await closeOurs(`+${pnlPips.toFixed(0)}p — 1m momentum faded`);
-        reversalCounts.clear();
-        return;
-      }
+      if(favorableMomentum){setStatus(`PROFIT ${pnlPips.toFixed(0)}p — ${heldSide} momentum growing | HOLD`);}
+      else{await closeOurs(`+${pnlPips.toFixed(0)}p — 1m momentum faded`);reversalCounts.clear();return;}
     }else if(pnlPips<=-ADVERSE_MOMENTUM_PIPS){
-      if(adverseMomentum){
-        await closeOurs(`${pnlPips.toFixed(0)}p — 1m adverse momentum growing`);
-        reversalCounts.clear();
-        return;
-      }else{
-        setStatus(`DRAW ${pnlPips.toFixed(0)}p — momentum may recover | HOLD`);
-      }
-    }else{
-      setStatus(`HOLDING ${positions.length}/${MAX_POSITIONS} ${heldSide} | ${pnlPips.toFixed(0)}p | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);
-    }
+      if(adverseMomentum){await closeOurs(`${pnlPips.toFixed(0)}p — 1m adverse momentum growing`);reversalCounts.clear();return;}
+      else setStatus(`DRAW ${pnlPips.toFixed(0)}p — momentum may recover | HOLD`);
+    }else setStatus(`HOLDING ${positions.length}/${MAX_POSITIONS} ${heldSide} | ${pnlPips.toFixed(0)}p | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);
     if(positions.length>=MAX_POSITIONS)return;
   }
   const signal=directionSignal();
