@@ -32,6 +32,28 @@ jobs:
           printf '\n}\n' >> app/build.gradle
           tail -8 app/build.gradle
 
+      - name: Configure persistent release signing when available
+        env:
+          PIPSLIFE_KEYSTORE_BASE64: ${{ secrets.PIPSLIFE_KEYSTORE_BASE64 }}
+          PIPSLIFE_KEYSTORE_PASSWORD: ${{ secrets.PIPSLIFE_KEYSTORE_PASSWORD }}
+          PIPSLIFE_KEY_ALIAS: ${{ secrets.PIPSLIFE_KEY_ALIAS }}
+          PIPSLIFE_KEY_PASSWORD: ${{ secrets.PIPSLIFE_KEY_PASSWORD }}
+        run: |
+          if [ -n "${PIPSLIFE_KEYSTORE_BASE64:-}" ]; then
+            echo "$PIPSLIFE_KEYSTORE_BASE64" | base64 --decode > pipslife-release.jks
+            python3 - <<'PY'
+            from pathlib import Path
+            p=Path('app/build.gradle')
+            s=p.read_text()
+            s=s.replace("signingConfigs { release { } }", "signingConfigs { release { storeFile file('pipslife-release.jks'); storePassword System.getenv('PIPSLIFE_KEYSTORE_PASSWORD'); keyAlias System.getenv('PIPSLIFE_KEY_ALIAS'); keyPassword System.getenv('PIPSLIFE_KEY_PASSWORD') } }")
+            s=s.replace("signingConfig signingConfigs.debug", "signingConfig signingConfigs.release")
+            p.write_text(s)
+            PY
+            echo "Persistent Pips-life release signing enabled"
+          else
+            echo "Persistent signing secrets not configured; legacy debug signing remains active"
+          fi
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -85,5 +107,5 @@ jobs:
           gh release create "$TAG" Pips-life-Multi-bot.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "Pips-life Multi-bot 2.10 (${VERSION_CODE})" \
-            --notes "Broker-validation-safe individual entries, dynamic momentum exit, and in-app updater. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}." \
+            --notes "Broker-validation-safe individual entries, dynamic momentum exit, persistent updater versioning, and in-app updater. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}." \
             --latest
