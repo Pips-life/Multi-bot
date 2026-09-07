@@ -65,3 +65,5 @@ jobs:
           name: Multi-bot-trailing-dynamic-exit-release-apk
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
+
+# Broker-validation fix build trigger
