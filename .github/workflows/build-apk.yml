@@ -29,40 +29,9 @@ jobs:
           s=s.replace("lastEntryPrice=reference;setStatus(`OPEN BATCH ${side} ${slots} × ${volume} — SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);", "lastEntryPrice=reference;setStatus(`OPEN BATCH ${side} ${marginSlots} × ${volume} — margin-aware | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);")
           start=s.index("async function onTick(mid,bid,ask,previous){")
           end=s.index("function startForegroundService", start)
-          newtick="""async function onTick(mid,bid,ask,previous){
-  reconcile();
-  if(Number.isNaN(previous)){setStatus('Streaming XAUUSD — building direction model');return;}
-  const positions=ownedPositions();
-  if(positions.length){
-    const heldSide=sideOf(positions[0]);
-    const pip=brokerPipSize();
-    const current=heldSide==='BUY'?bid:ask;
-    const avgEntry=positions.reduce((sum,p)=>sum+(Number(p.openPrice)||current),0)/Math.max(1,positions.length);
-    const pnlPips=heldSide==='BUY'?(current-avgEntry)/pip:(avgEntry-current)/pip;
-    const deltaSum=momentumDeltas.slice(-MOMENTUM_WINDOW).reduce((a,b)=>a+b,0);
-    const favorableMomentum=heldSide==='BUY'?deltaSum>0:deltaSum<0;
-    const adverseMomentum=heldSide==='BUY'?deltaSum<0:deltaSum>0;
-    if(pnlPips>=PROFIT_MANAGEMENT_PIPS){
-      if(favorableMomentum)setStatus(`PROFIT ${pnlPips.toFixed(0)}p — ${heldSide} momentum growing | HOLD`);
-      else{await closeOurs(`+${pnlPips.toFixed(0)}p — 1m momentum faded`);reversalCounts.clear();return;}
-    }else if(pnlPips<=-ADVERSE_MOMENTUM_PIPS){
-      if(adverseMomentum){await closeOurs(`${pnlPips.toFixed(0)}p — 1m adverse momentum growing`);reversalCounts.clear();return;}
-      else setStatus(`DRAW ${pnlPips.toFixed(0)}p — momentum may recover | HOLD`);
-    }else setStatus(`HOLDING ${positions.length}/${MAX_POSITIONS} ${heldSide} | ${pnlPips.toFixed(0)}p | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);
-    if(positions.length>=MAX_POSITIONS)return;
-  }
-  const signal=directionSignal();
-  if(!signal.side){if(!positions.length)setStatus(`WAITING — building direction | samples ${priceHistory.length}/${SLOW_EMA+2}`);return;}
-  if(positions.length&&positions.some(p=>sideOf(p)!==signal.side))return;
-  await enter(signal.side,bid,ask);
-}
-"""
+          newtick="async function onTick(mid,bid,ask,previous){\n  reconcile();\n  if(Number.isNaN(previous)){setStatus('Streaming XAUUSD — building direction model');return;}\n  const positions=ownedPositions();\n  if(positions.length){\n    const heldSide=sideOf(positions[0]);\n    const pip=brokerPipSize();\n    const current=heldSide==='BUY'?bid:ask;\n    const avgEntry=positions.reduce((sum,p)=>sum+(Number(p.openPrice)||current),0)/Math.max(1,positions.length);\n    const pnlPips=heldSide==='BUY'?(current-avgEntry)/pip:(avgEntry-current)/pip;\n    const deltaSum=momentumDeltas.slice(-MOMENTUM_WINDOW).reduce((a,b)=>a+b,0);\n    const favorableMomentum=heldSide==='BUY'?deltaSum>0:deltaSum<0;\n    const adverseMomentum=heldSide==='BUY'?deltaSum<0:deltaSum>0;\n    if(pnlPips>=PROFIT_MANAGEMENT_PIPS){\n      if(favorableMomentum)setStatus(`PROFIT ${pnlPips.toFixed(0)}p — ${heldSide} momentum growing | HOLD`);\n      else{await closeOurs(`+${pnlPips.toFixed(0)}p — 1m momentum faded`);reversalCounts.clear();return;}\n    }else if(pnlPips<=-ADVERSE_MOMENTUM_PIPS){\n      if(adverseMomentum){await closeOurs(`${pnlPips.toFixed(0)}p — 1m adverse momentum growing`);reversalCounts.clear();return;}\n      else setStatus(`DRAW ${pnlPips.toFixed(0)}p — momentum may recover | HOLD`);\n    }else setStatus(`HOLDING ${positions.length}/${MAX_POSITIONS} ${heldSide} | ${pnlPips.toFixed(0)}p | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);\n    if(positions.length>=MAX_POSITIONS)return;\n  }\n  const signal=directionSignal();\n  if(!signal.side){if(!positions.length)setStatus(`WAITING — building direction | samples ${priceHistory.length}/${SLOW_EMA+2}`);return;}\n  if(positions.length&&positions.some(p=>sideOf(p)!==signal.side))return;\n  await enter(signal.side,bid,ask);\n}\n"
           s=s[:start]+newtick+s[end:]
           p.write_text(s)
-          g=Path('app/build.gradle')
-          if g.exists():
-            gs=g.read_text().replace('versionCode 17','versionCode 18').replace('versionName "2.6"','versionName "2.7"')
-            g.write_text(gs)
 
       - uses: actions/setup-node@v4
         with:
