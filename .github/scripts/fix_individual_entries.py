@@ -24,8 +24,10 @@ new_enter = r'''async function enter(side,bid,ask){
   let opened=0;
 
   try{
-    // One order at a time. Do not pre-submit a batch: MetaApi/broker validation
-    // can race when several XAUUSD orders consume margin simultaneously.
+    // Submit the broker-minimal market request: symbol + volume only.
+    // Do not send magic/clientId/comment or SL/TP on the initial request.
+    // This isolates broker execution from optional validation fields. The
+    // protective 200-pip SL is attached only after the actual fill is known.
     for(let i=0;i<slots;i++){
       const positions=ownedPositions();
       if(positions.length>=MAX_POSITIONS)break;
@@ -39,7 +41,7 @@ new_enter = r'''async function enter(side,bid,ask){
       }
 
       const price=connection?.terminalState?.price(SYMBOL);
-      const reference=side==='BUY'?Number(price?.ask):(Number(price?.bid));
+      const reference=side==='BUY'?Number(price?.ask):Number(price?.bid);
       const fallback=side==='BUY'?Number(ask):Number(bid);
       const entryPrice=Number.isFinite(reference)&&reference>0?reference:fallback;
       if(!Number.isFinite(entryPrice)||entryPrice<=0){
@@ -47,16 +49,10 @@ new_enter = r'''async function enter(side,bid,ask){
         break;
       }
 
-      const clientId=`MB_${Date.now().toString(36)}_${i}_${Math.floor(Math.random()*36).toString(36)}`;
-      const options={comment:`MB ${side}`,magic:MAGIC,clientId};
-
       try{
-        // Fill first without attaching a potentially invalid/stale SL/TP price.
-        // Once the broker confirms the position, place the protective SL using
-        // the actual filled price. This avoids broker validation failures caused
-        // by spread/stop-level changes between signal and execution.
-        if(side==='BUY') await connection.createMarketBuyOrder(SYMBOL,volume,undefined,undefined,options);
-        else await connection.createMarketSellOrder(SYMBOL,volume,undefined,undefined,options);
+        // Minimal market order: no optional broker validation fields.
+        if(side==='BUY') await connection.createMarketBuyOrder(SYMBOL,volume);
+        else await connection.createMarketSellOrder(SYMBOL,volume);
 
         const position=await waitForPosition(side,7000);
         if(!position){
@@ -70,12 +66,18 @@ new_enter = r'''async function enter(side,bid,ask){
 
         const stopLoss=initialStop(side,filledPrice);
         if(Number.isFinite(stopLoss)){
-          try{
-            await connection.modifyPosition(idOf(position),stopLoss,undefined);
-          }catch(slError){
-            // Never reject an otherwise valid fill because a protective SL was
-            // rejected. Keep monitoring the position and report the exact issue.
-            setStatus(`OPEN ${side} ${opened}/${slots} — SL placement rejected: ${slError?.message||slError}`);
+          let slApplied=false;
+          for(let attempt=1;attempt<=3&&!slApplied;attempt++){
+            try{
+              await connection.modifyPosition(idOf(position),stopLoss,undefined);
+              slApplied=true;
+            }catch(slError){
+              if(attempt===3){
+                setStatus(`OPEN ${side} ${opened}/${slots} — SL placement rejected after 3 attempts: ${slError?.message||slError}`);
+              }else{
+                await new Promise(r=>setTimeout(r,250*attempt));
+              }
+            }
           }
         }
 
