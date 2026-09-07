@@ -29,6 +29,9 @@ jobs:
       - name: Update daily gain P/L display
         run: python3 .github/scripts/update_daily_pnl_ui.py
 
+      - name: Enforce per-position 200 pip SL and -100 pip adverse momentum exits
+        run: python3 .github/scripts/enforce_per_position_risk.py
+
       - name: Set monotonic release version
         run: |
           VERSION_CODE=$((100000 + GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
@@ -126,5 +129,5 @@ jobs:
           gh release create "$TAG" Pips-life-Multi-bot.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "Pips-life Multi-bot 2.10 (${VERSION_CODE})" \
-            --notes "Daily gain P/L UI: amount and percentage versus day-start account balance, with floating and realized today values. Candle-size directional judgement, large-candle retracement entries, individual 200-pip protective SLs, +100-pip momentum exits, and dynamic momentum SL locking. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}. Persistent release signing enforced. Engine status stabilized during MetaApi resynchronization." \
+            --notes "Per-position risk: every open position is independently protected at -200 pips. At -100 pips, that position closes only when adverse momentum is growing; if adverse momentum has faded/neutralized, it is held and remains protected by the -200 pip SL. Daily gain P/L UI: amount and percentage versus day-start account balance. Candle-size directional judgement, large-candle retracement entries, +100-pip momentum exits, and dynamic momentum SL locking. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}. Persistent release signing enforced. Engine status stabilized during MetaApi resynchronization." \
             --latest
