@@ -147,9 +147,6 @@ for name in ('LARGE_CANDLE_MULTIPLIER','MIN_LARGE_CANDLE_PIPS','RETRACEMENT_MIN'
              'RETRACEMENT_MAX','IMPULSE_LOOKBACK_CANDLES'):
     s = re.sub(rf'const {name}=[^;]+;\s*', '', s)
 
-# The previous build script also replaced the entire onTick function. Keep that
-# management model, but make its range units correct: averageCandleRange() is in
-# pips, while candleHigh/candleLow/momentum deltas are in price units.
 start = s.index("async function onTick(mid,bid,ask,previous){")
 end = s.index("function startForegroundService", start)
 
@@ -181,7 +178,9 @@ async function manageOnePosition(position,bid,ask){
   const profitPips=side==='BUY'?(current-entry)/pip:(entry-current)/pip;
   const m=adaptiveMomentumState(side);
 
-  if(profitPips>0){
+  // Do not tighten the dynamic SL before the +100 pip profit threshold.
+  // The original protective SL remains active below this threshold.
+  if(profitPips>=100){
     const distance=Math.max(m.scale*0.5,pip);
     const desired=normalizePrice(side==='BUY'?current-distance:current+distance);
     const old=Number(position?.stopLoss);
@@ -194,7 +193,10 @@ async function manageOnePosition(position,bid,ask){
     }
   }
 
-  if(profitPips>0){
+  // Momentum-based profit exits only become active after +100 pips.
+  // Before +100, a position is allowed to breathe and is protected only by
+  // its initial/previously established protective SL.
+  if(profitPips>=100){
     const fading=!m.aligned || m.strength<0.5;
     const reversing=m.adverse&&m.accelerationAgainst&&Math.abs(m.recent)>=Math.abs(m.prior);
     if(reversing||fading){
@@ -205,6 +207,8 @@ async function manageOnePosition(position,bid,ask){
     }
   }
 
+  // Losing positions still use the adverse-momentum protection; the +100 pip
+  // threshold applies specifically to profit-taking/fade exits.
   if(profitPips<0&&m.adverse&&m.accelerationAgainst&&m.strength>=1){
     await closePosition(position,`${profitPips.toFixed(0)}p — adverse momentum strengthening`);
     return true;
@@ -238,5 +242,5 @@ async function onTick(mid,bid,ask,previous){
 '''
 s = s[:start] + new_tick + s[end:]
 
-s=s.replace("| TP ${TAKE_PROFIT_PIPS}p", "| MOMENTUM TP")
+s=s.replace("| TP ${TAKE_PROFIT_PIPS}p", "| MOMENTUM TP FROM +100p")
 p.write_text(s)
