@@ -13,6 +13,7 @@ s = s.replace("const CANDLE_MS=300000;", "const CANDLE_MS=60000;")
 marker = "let directionConfirmations=0;\n"
 insert = r'''const oppositeTrailOrders=new Map();
 const triggeredTrailOrders=new Set();
+const trailPending=new Set();
 function oppositeSide(side){return side==='BUY'?'SELL':side==='SELL'?'BUY':'';}
 function oppositeTrailPrice(side,bid,ask){const pip=brokerPipSize();if(!Number.isFinite(pip)||pip<=0)return NaN;return normalizePrice(side==='BUY'?Number(bid)-OPPOSITE_STOP_TRAIL_PIPS*pip:Number(ask)+OPPOSITE_STOP_TRAIL_PIPS*pip);}
 function orderIdOf(x){return String(x?.id??x?.orderId??'');}
@@ -22,11 +23,11 @@ async function ensureOppositeTrail(position,bid,ask){
  const target=oppositeTrailPrice(side,bid,ask);if(!Number.isFinite(target))return;
  const state=oppositeTrailOrders.get(positionId);
  if(state?.orderId){const current=Number(state.price);const improves=side==='BUY'?target>current:target<current;if(!improves)return;try{await connection.modifyOrder(state.orderId,target,undefined);state.price=target;oppositeTrailOrders.set(positionId,state);}catch(e){const msg=String(e?.message||e);if(/not found|unknown order|does not exist|invalid order/i.test(msg))oppositeTrailOrders.delete(positionId);else return;}}
- if(oppositeTrailOrders.has(positionId))return;
- const opposite=oppositeSide(side);try{let order;if(opposite==='BUY')order=await connection.createStopBuyOrder(SYMBOL,volume,target);else order=await connection.createStopSellOrder(SYMBOL,volume,target);const oid=orderIdOf(order);if(!oid)throw new Error('broker did not return opposite-stop order id');oppositeTrailOrders.set(positionId,{orderId:oid,price:target,side});setStatus(`TRAIL ${side} ${positionId.slice(-6)} — ${opposite} stop ${target} active`);}catch(e){setStatus(`TRAIL ${side} failed — ${e?.message||e}`);}
+ if(oppositeTrailOrders.has(positionId)||trailPending.has(positionId))return;
+ const opposite=oppositeSide(side);trailPending.add(positionId);try{let order;if(opposite==='BUY')order=await connection.createStopBuyOrder(SYMBOL,volume,target);else order=await connection.createStopSellOrder(SYMBOL,volume,target);const oid=orderIdOf(order);if(!oid)throw new Error('broker did not return opposite-stop order id');oppositeTrailOrders.set(positionId,{orderId:oid,price:target,side});setStatus(`TRAIL ${side} ${positionId.slice(-6)} — ${opposite} stop ${target} active`);}catch(e){setStatus(`TRAIL ${side} failed — ${e?.message||e}`);}finally{trailPending.delete(positionId);}
 }
 async function handleTriggeredTrail(order){
- const oid=orderIdOf(order);if(!oid||triggeredTrailOrders.has(oid))return;let sourceId='';for(const [positionId,state] of oppositeTrailOrders.entries()){if(state?.orderId===oid){sourceId=positionId;break;}}if(!sourceId)return;triggeredTrailOrders.add(oid);oppositeTrailOrders.delete(sourceId);const source=ownedPositions().find(p=>idOf(p)===sourceId);if(source){try{await connection.closePosition(sourceId);setStatus(`REVERSE ${sourceId.slice(-6)} — old ${sideOf(source)} closed immediately`);}catch(e){setStatus(`REVERSE CLOSE ${sourceId.slice(-6)} failed — ${e?.message||e}`);}}}
+ const oid=orderIdOf(order);if(!oid||triggeredTrailOrders.has(oid))return;let sourceId='';for(const [positionId,state] of oppositeTrailOrders.entries()){if(state?.orderId===oid){sourceId=positionId;break;}}if(!sourceId)return;triggeredTrailOrders.add(oid);oppositeTrailOrders.delete(sourceId);trailPending.delete(sourceId);const source=ownedPositions().find(p=>idOf(p)===sourceId);if(source){try{await connection.closePosition(sourceId);setStatus(`REVERSE ${sourceId.slice(-6)} — old ${sideOf(source)} closed immediately`);}catch(e){setStatus(`REVERSE CLOSE ${sourceId.slice(-6)} failed — ${e?.message||e}`);}}}
 async function reconcileOppositeTrails(bid,ask){const positions=ownedPositions();const ids=new Set(positions.map(idOf));for(const [positionId,state] of [...oppositeTrailOrders.entries()]){if(!ids.has(positionId)){await cancelTrailOrder(state?.orderId);oppositeTrailOrders.delete(positionId);}}for(const position of positions)await ensureOppositeTrail(position,bid,ask);}
 '''
 if marker in s and 'const oppositeTrailOrders=new Map();' not in s:s=s.replace(marker,marker+insert)
