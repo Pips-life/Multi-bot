@@ -1,0 +1,36 @@
+name: Remove speed-aware profit lock
+on:
+  push:
+    branches: [fixed-sl-tp-direction-20260904]
+permissions:
+  contents: write
+jobs:
+  edit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove profit-lock machinery
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('web/main.js')
+          s=p.read_text()
+          s=s.replace("const TRAILING_SL_PIPS=100;\n", "")
+          s=s.replace("// Broker spread is approximately 35 pips. Profit protection is deliberately\n// armed only after the trade has cleared the spread, then locks profit in stages.\nconst SPREAD_PIPS=35;\n", "")
+          s=s.replace("const repairingPositionIds=new Set();\n", "")
+          s=s.replace("function trailingStop(side,price){const pip=brokerPipSize(),base=Number(price);if(!Number.isFinite(base)||base<=0)return undefined;return normalizePrice(side==='BUY'?base-TRAILING_SL_PIPS*pip:base+TRAILING_SL_PIPS*pip);}\n", "")
+          s=s.replace("function profitPips(position,current){const side=sideOf(position),open=Number(position.openPrice),price=Number(current),pip=brokerPipSize();if(!side||!Number.isFinite(open)||!Number.isFinite(price)||pip<=0)return NaN;return side==='BUY'?(price-open)/pip:(open-price)/pip;}\nfunction protectedStop(){return undefined;}\n", "")
+          s=s.replace("for(const p of positions)if(!repairingPositionIds.has(idOf(p)))void enforceTrailing(p);", "")
+          start=s.find("async function enforceTrailing(position){")
+          if start>=0:
+              end=s.find("async function closePosition(position,reason){", start)
+              if end<0: raise SystemExit('closePosition anchor not found')
+              s=s[:start]+s[end:]
+          p.write_text(s)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add web/main.js
+          git commit -m 'Remove speed-aware profit lock'
+          git push
