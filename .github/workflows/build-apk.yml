@@ -35,28 +35,31 @@ jobs:
           printf '\n}\n' >> app/build.gradle
           tail -8 app/build.gradle
 
-      - name: Configure persistent release signing when available
-        continue-on-error: true
+      - name: Require persistent release signing
         env:
           PIPSLIFE_KEYSTORE_BASE64: ${{ secrets.PIPSLIFE_KEYSTORE_BASE64 }}
           PIPSLIFE_KEYSTORE_PASSWORD: ${{ secrets.PIPSLIFE_KEYSTORE_PASSWORD }}
           PIPSLIFE_KEY_ALIAS: ${{ secrets.PIPSLIFE_KEY_ALIAS }}
           PIPSLIFE_KEY_PASSWORD: ${{ secrets.PIPSLIFE_KEY_PASSWORD }}
         run: |
-          if [ -n "${PIPSLIFE_KEYSTORE_BASE64:-}" ]; then
-            echo "$PIPSLIFE_KEYSTORE_BASE64" | base64 --decode > pipslife-release.jks
-            python3 - <<'PY'
-            from pathlib import Path
-            p=Path('app/build.gradle')
-            s=p.read_text()
-            s=s.replace("signingConfigs { release { } }", "signingConfigs { release { storeFile file('pipslife-release.jks'); storePassword System.getenv('PIPSLIFE_KEYSTORE_PASSWORD'); keyAlias System.getenv('PIPSLIFE_KEY_ALIAS'); keyPassword System.getenv('PIPSLIFE_KEY_PASSWORD') } }")
-            s=s.replace("signingConfig signingConfigs.debug", "signingConfig signingConfigs.release")
-            p.write_text(s)
-            PY
-            echo "Persistent Pips-life release signing enabled"
-          else
-            echo "Persistent signing secrets not configured; legacy debug signing remains active"
+          if [ -z "${PIPSLIFE_KEYSTORE_BASE64:-}" ] || \
+             [ -z "${PIPSLIFE_KEYSTORE_PASSWORD:-}" ] || \
+             [ -z "${PIPSLIFE_KEY_ALIAS:-}" ] || \
+             [ -z "${PIPSLIFE_KEY_PASSWORD:-}" ]; then
+            echo "ERROR: Persistent release signing is not configured. Refusing to publish an APK that cannot update over the installed app."
+            exit 1
           fi
+          echo "$PIPSLIFE_KEYSTORE_BASE64" | base64 --decode > pipslife-release.jks
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('app/build.gradle')
+          s=p.read_text()
+          s=s.replace("signingConfigs { release { } }", "signingConfigs { release { storeFile file('pipslife-release.jks'); storePassword System.getenv('PIPSLIFE_KEYSTORE_PASSWORD'); keyAlias System.getenv('PIPSLIFE_KEY_ALIAS'); keyPassword System.getenv('PIPSLIFE_KEY_PASSWORD') } }")
+          s=s.replace("signingConfig signingConfigs.debug", "signingConfig signingConfigs.release")
+          p.write_text(s)
+          PY
+          echo "Persistent Pips-life release signing enabled"
+          keytool -list -v -keystore pipslife-release.jks -storepass "$PIPSLIFE_KEYSTORE_PASSWORD" -alias "$PIPSLIFE_KEY_ALIAS" | grep -E 'Alias name:|SHA256:'
 
       - uses: actions/setup-node@v4
         with:
@@ -94,6 +97,8 @@ jobs:
           gradle clean assembleRelease --stacktrace
           test -f app/build/outputs/apk/release/app-release.apk
           test ! -f app/build/outputs/apk/debug/app-debug.apk
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)
+          "$BUILD_TOOLS/apksigner" verify --verbose app/build/outputs/apk/release/app-release.apk
           ls -lh app/build/outputs/apk/release/app-release.apk
           cp app/build/outputs/apk/release/app-release.apk Pips-life-Multi-bot.apk
 
@@ -111,5 +116,5 @@ jobs:
           gh release create "$TAG" Pips-life-Multi-bot.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "Pips-life Multi-bot 2.10 (${VERSION_CODE})" \
-            --notes "Candle-size directional judgement, large-candle retracement entries, individual 200-pip protective SLs, dynamic momentum SL locking, and momentum-based dynamic TP exits. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}." \
+            --notes "Candle-size directional judgement, large-candle retracement entries, individual 200-pip protective SLs, dynamic momentum SL locking, and momentum-based dynamic TP exits. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}. Persistent release signing enforced." \
             --latest
