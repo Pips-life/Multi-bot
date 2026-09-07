@@ -1,6 +1,7 @@
 name: One-time strategy update
 on:
-  workflow_dispatch:
+  push:
+    branches: [ fixed-sl-tp-direction-20260904 ]
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -17,7 +18,29 @@ jobs:
           s=s.replace("const TRAILING_SL_PIPS=70;", "const TRAILING_SL_PIPS=100;\nconst TAKE_PROFIT_PIPS=200;\nconst DIRECTION_CONFIRMATIONS=3;")
           s=s.replace("const reversalCounts=new Map();", "const reversalCounts=new Map();\nlet directionCandidate='';\nlet directionConfirmations=0;")
           old="function directionSignal(){if(priceHistory.length<SLOW_EMA+2)return {side:'',score:0};const mids=priceHistory.map(x=>x.mid),fast=ema(mids.slice(-FAST_EMA*2),FAST_EMA),slow=ema(mids.slice(-SLOW_EMA*2),SLOW_EMA);const side=fast>slow?'BUY':fast<slow?'SELL':'';return {side,score:side?1:0};}"
-          new="""function directionSignal(){\n            if(priceHistory.length<SLOW_EMA+8)return {side:'',score:0,confirmed:false};\n            const mids=priceHistory.map(x=>x.mid);\n            const fastSeries=mids.slice(-FAST_EMA*2);\n            const slowSeries=mids.slice(-SLOW_EMA*2);\n            const fast=ema(fastSeries,FAST_EMA),slow=ema(slowSeries,SLOW_EMA);\n            const fastPrev=ema(fastSeries.slice(0,-5),FAST_EMA);\n            const slowPrev=ema(slowSeries.slice(0,-5),SLOW_EMA);\n            const fastSlope=fast-fastPrev,slowSlope=slow-slowPrev;\n            const deltas=momentumDeltas.slice(-MOMENTUM_WINDOW);\n            const momentum=deltas.reduce((a,b)=>a+b,0);\n            const price=mids[mids.length-1];\n            const buyScore=(fast>slow?1:0)+(fastSlope>0?1:0)+(slowSlope>0?1:0)+(momentum>0?1:0)+(candleSide==='BUY'?1:0)+(price>fast?1:0);\n            const sellScore=(fast<slow?1:0)+(fastSlope<0?1:0)+(slowSlope<0?1:0)+(momentum<0?1:0)+(candleSide==='SELL'?1:0)+(price<fast?1:0);\n            let side='';\n            if(buyScore>=4&&buyScore>sellScore)side='BUY';\n            else if(sellScore>=4&&sellScore>buyScore)side='SELL';\n            const score=side==='BUY'?buyScore:side==='SELL'?sellScore:0;\n            if(!side){directionCandidate='';directionConfirmations=0;return {side:'',score,confirmed:false};}\n            if(side===directionCandidate)directionConfirmations++;\n            else {directionCandidate=side;directionConfirmations=1;}\n            return {side:directionConfirmations>=DIRECTION_CONFIRMATIONS?side:'',score,confirmed:directionConfirmations>=DIRECTION_CONFIRMATIONS};\n          }"""
+          new="""function directionSignal(){
+            if(priceHistory.length<SLOW_EMA+8)return {side:'',score:0,confirmed:false};
+            const mids=priceHistory.map(x=>x.mid);
+            const fastSeries=mids.slice(-FAST_EMA*2);
+            const slowSeries=mids.slice(-SLOW_EMA*2);
+            const fast=ema(fastSeries,FAST_EMA),slow=ema(slowSeries,SLOW_EMA);
+            const fastPrev=ema(fastSeries.slice(0,-5),FAST_EMA);
+            const slowPrev=ema(slowSeries.slice(0,-5),SLOW_EMA);
+            const fastSlope=fast-fastPrev,slowSlope=slow-slowPrev;
+            const deltas=momentumDeltas.slice(-MOMENTUM_WINDOW);
+            const momentum=deltas.reduce((a,b)=>a+b,0);
+            const price=mids[mids.length-1];
+            const buyScore=(fast>slow?1:0)+(fastSlope>0?1:0)+(slowSlope>0?1:0)+(momentum>0?1:0)+(candleSide==='BUY'?1:0)+(price>fast?1:0);
+            const sellScore=(fast<slow?1:0)+(fastSlope<0?1:0)+(slowSlope<0?1:0)+(momentum<0?1:0)+(candleSide==='SELL'?1:0)+(price<fast?1:0);
+            let side='';
+            if(buyScore>=4&&buyScore>sellScore)side='BUY';
+            else if(sellScore>=4&&sellScore>buyScore)side='SELL';
+            const score=side==='BUY'?buyScore:side==='SELL'?sellScore:0;
+            if(!side){directionCandidate='';directionConfirmations=0;return {side:'',score,confirmed:false};}
+            if(side===directionCandidate)directionConfirmations++;
+            else {directionCandidate=side;directionConfirmations=1;}
+            return {side:directionConfirmations>=DIRECTION_CONFIRMATIONS?side:'',score,confirmed:directionConfirmations>=DIRECTION_CONFIRMATIONS};
+          }"""
           if old not in s: raise SystemExit('directionSignal pattern not found')
           s=s.replace(old,new)
           old="function protectedStop(position,current){const side=sideOf(position);return side?trailingStop(side,current):undefined;}"
