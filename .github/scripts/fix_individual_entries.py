@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 
 p = Path('web/main.js')
 s = p.read_text()
@@ -11,10 +10,10 @@ new_enter = r'''async function enter(side,bid,ask){
   const initialPositions=ownedPositions();
   if(entryInFlight||initialPositions.length>=MAX_POSITIONS||!connection||!synchronized||!positionDistanceAllows(side,initialPositions))return;
 
-  const info=connection?.terminalState?.accountInformation||{};
-  const initialFreeMargin=Number(info.freeMargin);
-  if(Number.isFinite(initialFreeMargin)&&initialFreeMargin<=0){
-    setStatus('ENTRY BLOCKED — insufficient free margin');
+  const accountInfo=connection?.terminalState?.accountInformation||{};
+  const freeMargin=Number(accountInfo.freeMargin);
+  if(Number.isFinite(freeMargin)&&freeMargin<=0){
+    setStatus('ENTRY BLOCKED — broker reports no free margin');
     return;
   }
 
@@ -25,55 +24,74 @@ new_enter = r'''async function enter(side,bid,ask){
   let opened=0;
 
   try{
-    // Never submit a batch with Promise.all. Each position is validated and
-    // confirmed by the broker before the next one is attempted. This prevents
-    // MetaApi validation races when several orders consume the same margin.
+    // One order at a time. Do not pre-submit a batch: MetaApi/broker validation
+    // can race when several XAUUSD orders consume margin simultaneously.
     for(let i=0;i<slots;i++){
       const positions=ownedPositions();
       if(positions.length>=MAX_POSITIONS)break;
       if(!positionDistanceAllows(side,positions))break;
 
-      const accountInfo=connection?.terminalState?.accountInformation||{};
-      const freeMargin=Number(accountInfo.freeMargin);
-      if(Number.isFinite(freeMargin)&&freeMargin<=0){
-        setStatus(`ENTRY STOPPED — free margin exhausted after ${opened} position${opened===1?'':'s'}`);
+      const liveInfo=connection?.terminalState?.accountInformation||{};
+      const liveFreeMargin=Number(liveInfo.freeMargin);
+      if(Number.isFinite(liveFreeMargin)&&liveFreeMargin<=0){
+        setStatus(`ENTRY STOPPED — broker free margin exhausted after ${opened}`);
         break;
       }
 
-      const spec=connection?.terminalState?.specification(SYMBOL);
-      const marginRequired=Number(spec?.marginRequired)||0;
-      if(marginRequired>0&&Number.isFinite(freeMargin)&&freeMargin<marginRequired*volume){
-        setStatus(`ENTRY STOPPED — balance/free margin allows ${opened} position${opened===1?'':'s'}`);
+      const price=connection?.terminalState?.price(SYMBOL);
+      const reference=side==='BUY'?Number(price?.ask):(Number(price?.bid));
+      const fallback=side==='BUY'?Number(ask):Number(bid);
+      const entryPrice=Number.isFinite(reference)&&reference>0?reference:fallback;
+      if(!Number.isFinite(entryPrice)||entryPrice<=0){
+        setStatus('ENTRY STOPPED — live broker price unavailable');
         break;
       }
-
-      const latestPrice=side==='BUY'?Number(connection?.terminalState?.price(SYMBOL)?.ask):Number(connection?.terminalState?.price(SYMBOL)?.bid);
-      const reference=Number.isFinite(latestPrice)&&latestPrice>0?latestPrice:(side==='BUY'?ask:bid);
-      const stopLoss=initialStop(side,reference);
-      if(!Number.isFinite(stopLoss))break;
 
       const clientId=`MB_${Date.now().toString(36)}_${i}_${Math.floor(Math.random()*36).toString(36)}`;
       const options={comment:`MB ${side}`,magic:MAGIC,clientId};
 
       try{
-        if(side==='BUY') await connection.createMarketBuyOrder(SYMBOL,volume,stopLoss,undefined,options);
-        else await connection.createMarketSellOrder(SYMBOL,volume,stopLoss,undefined,options);
+        // Fill first without attaching a potentially invalid/stale SL/TP price.
+        // Once the broker confirms the position, place the protective SL using
+        // the actual filled price. This avoids broker validation failures caused
+        // by spread/stop-level changes between signal and execution.
+        if(side==='BUY') await connection.createMarketBuyOrder(SYMBOL,volume,undefined,undefined,options);
+        else await connection.createMarketSellOrder(SYMBOL,volume,undefined,undefined,options);
+
+        const position=await waitForPosition(side,7000);
+        if(!position){
+          setStatus(`ENTRY ${side} submitted but broker position confirmation timed out`);
+          break;
+        }
+
         opened++;
-        lastEntryPrice=reference;
-        await waitForPosition(side,5000);
+        const filledPrice=Number(position.openPrice)||entryPrice;
+        lastEntryPrice=filledPrice;
+
+        const stopLoss=initialStop(side,filledPrice);
+        if(Number.isFinite(stopLoss)){
+          try{
+            await connection.modifyPosition(idOf(position),stopLoss,undefined);
+          }catch(slError){
+            // Never reject an otherwise valid fill because a protective SL was
+            // rejected. Keep monitoring the position and report the exact issue.
+            setStatus(`OPEN ${side} ${opened}/${slots} — SL placement rejected: ${slError?.message||slError}`);
+          }
+        }
+
         reconcile();
-        setStatus(`OPEN ${side} ${opened}/${slots} × ${volume} — individual margin-aware entry | SL ${INITIAL_SL_PIPS}p | MOMENTUM EXIT`);
+        if(!lastStatus.includes('SL placement rejected')){
+          setStatus(`OPEN ${side} ${opened}/${slots} × ${volume} — broker confirmed | SL ${INITIAL_SL_PIPS}p | MOMENTUM EXIT`);
+        }
       }catch(e){
         const msg=e?.message||String(e);
-        // Stop immediately on validation/margin rejection. Do not resubmit the
-        // same order and do not turn one failed entry into a batch failure.
-        setStatus(`ENTRY ${side} ${opened+1} rejected — ${msg}`);
+        setStatus(`ENTRY ${side} ${opened+1} rejected by broker — ${msg}`);
         break;
       }
     }
 
-    if(opened>0)setStatus(`OPENED ${opened} individual ${side} position${opened===1?'':'s'} — balance/margin sized`);
-    else setStatus(`NO ${side} ENTRY — account balance/free margin insufficient or broker validation rejected it`);
+    if(opened>0)setStatus(`OPENED ${opened} individual ${side} position${opened===1?'':'s'} — broker-confirmed`);
+    else if(!lastStatus.includes('broker')&&!lastStatus.includes('ENTRY '))setStatus(`NO ${side} ENTRY — broker did not confirm a position`);
   }finally{
     entryInFlight=false;
   }
