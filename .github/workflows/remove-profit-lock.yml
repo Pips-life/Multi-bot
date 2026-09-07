@@ -21,11 +21,6 @@ jobs:
           s=s.replace("// After the whole position batch closes, wait 3 seconds before allowing a new batch.\nconst TRADE_COOLDOWN_MS=3000;\nlet lastClosureAt=0;", "// No fixed post-close cool-off: entries are governed by margin and confirmed direction.\n")
           s=s.replace("if(previousOwnedCount>0&&positions.length===0){lastClosureAt=Date.now();setStatus('ALL POSITIONS CLOSED — 3s COOL-OFF before next batch');}", "if(previousOwnedCount>0&&positions.length===0){setStatus('ALL POSITIONS CLOSED — ready for next confirmed direction');}")
           s=s.replace("async function closeOurs(reason){const positions=ownedPositions();if(!positions.length)return;await Promise.all(positions.map(p=>closePosition(p,reason)));lastClosureAt=Date.now();setStatus('ALL POSITIONS CLOSE REQUESTS SENT — 3s COOL-OFF');}", "async function closeOurs(reason){const positions=ownedPositions();if(!positions.length)return;await Promise.all(positions.map(p=>closePosition(p,reason)));setStatus('ALL POSITIONS CLOSE REQUESTS SENT');}")
-          old="if(entryInFlight||positions.length>=MAX_POSITIONS||!connection||!synchronized||!positionDistanceAllows(side,positions))return;if(Date.now()-lastClosureAt<TRADE_COOLDOWN_MS){const left=TRADE_COOLDOWN_MS-(Date.now()-lastClosureAt);setStatus(`COOL-OFF ${left}ms before next batch`);return;}const slots=Math.max(0,MAX_POSITIONS-positions.length);if(!slots)return;const volume=currentVolume(),reference=side==='BUY'?ask:bid,stopLoss=initialStop(side,reference);"
-          new="if(entryInFlight||positions.length>=MAX_POSITIONS||!connection||!synchronized||!positionDistanceAllows(side,positions))return;const info=connection?.terminalState?.accountInformation||{};const freeMargin=Number(info.freeMargin);if(Number.isFinite(freeMargin)&&freeMargin<=0){setStatus('ENTRY BLOCKED — insufficient free margin');return;}const slots=Math.max(0,MAX_POSITIONS-positions.length);if(!slots)return;const volume=currentVolume();const estimatedMarginPerTrade=Number(connection?.terminalState?.specification(SYMBOL)?.marginRequired)||0;const affordable=estimatedMarginPerTrade>0&&Number.isFinite(freeMargin)?Math.max(0,Math.floor(freeMargin/estimatedMarginPerTrade)):slots;const marginSlots=Math.min(slots,affordable||slots);if(!marginSlots)return;const reference=side==='BUY'?ask:bid,stopLoss=initialStop(side,reference);"
-          s=s.replace(old,new)
-          s=s.replace("for(let i=0;i<slots;i++)", "for(let i=0;i<marginSlots;i++)")
-          s=s.replace("lastEntryPrice=reference;setStatus(`OPEN BATCH ${side} ${slots} × ${volume} — SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);", "lastEntryPrice=reference;setStatus(`OPEN BATCH ${side} ${marginSlots} × ${volume} — margin-aware | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);")
           start=s.index("async function onTick(mid,bid,ask,previous){")
           end=s.index("function startForegroundService", start)
           newtick="""async function onTick(mid,bid,ask,previous){
@@ -47,7 +42,7 @@ jobs:
     }else if(pnlPips<=-ADVERSE_MOMENTUM_PIPS){
       if(adverseMomentum){await closeOurs(`${pnlPips.toFixed(0)}p — 1m adverse momentum growing`);reversalCounts.clear();return;}
       else setStatus(`DRAW ${pnlPips.toFixed(0)}p — momentum may recover | HOLD`);
-    }else setStatus(`HOLDING ${positions.length}/${MAX_POSITIONS} ${heldSide} | ${pnlPips.toFixed(0)}p | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);
+    }else setStatus(`HOLDING ${positions.length}/${MAX_POSITIONS} ${heldSide} | ${pnlPips.toFixed(0)}p | SL ${INITIAL_SL_PIPS}p | MOMENTUM EXIT`);
     if(positions.length>=MAX_POSITIONS)return;
   }
   const signal=directionSignal();
@@ -64,3 +59,48 @@ jobs:
           git add web/main.js
           git diff --cached --quiet || git commit -m 'Apply 1m momentum and margin-aware trade management'
           git push
+
+      - name: Apply latest trading management
+        run: python3 .github/scripts/apply_profit_momentum.py
+
+      - name: Apply broker-validation-safe individual entries
+        run: python3 .github/scripts/fix_individual_entries.py
+
+      - name: Repair release Gradle file
+        run: |
+          printf '\n}\n' >> app/build.gradle
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build MetaApi browser bundle
+        run: |
+          npm install
+          npm run build:web
+          test -s web-dist/bundle.js
+          mkdir -p app/src/main/assets
+          cp web/index.html app/src/main/assets/index.html
+          cp web-dist/bundle.js app/src/main/assets/bundle.js
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build signed release APK
+        run: |
+          gradle clean assembleRelease --stacktrace
+          test -f app/build/outputs/apk/release/app-release.apk
+          test ! -f app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/release/app-release.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Multi-bot-broker-validation-fix-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
