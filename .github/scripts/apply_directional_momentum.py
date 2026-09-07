@@ -4,10 +4,10 @@ import re
 p = Path('web/main.js')
 s = p.read_text()
 
+# Faster entry response while preserving the directional model.
+s = s.replace("const DIRECTION_CONFIRMATIONS=3;", "const DIRECTION_CONFIRMATIONS=2;")
+
 # Retracement is contextual, not a replacement for the existing direction model.
-# The bot first establishes directional bias from EMA structure, slopes, momentum,
-# candle direction and price location. A pullback into a prior displacement candle
-# may reinforce that same bias, but it must not become a separate entry model.
 start = s.index("function finalizeCandle(){")
 end = s.index("function updateCandle", start)
 
@@ -41,8 +41,7 @@ new_finalize = r'''function finalizeCandle(){
   }
 
   // Keep the displacement reference while the following price action remains
-  // structurally inside/around it. It expires only when the market establishes
-  // a new candle structure, not after a fixed pip/percentage window.
+  // structurally inside/around it. It expires when price breaks the impulse origin.
   if(activeImpulse){
     const impulseSide=activeImpulse.side;
     const price=Number(lastMid);
@@ -87,17 +86,17 @@ start = s.index("function directionSignal(){")
 end = s.index("function positionDistanceAllows", start)
 
 new_direction = r'''function directionSignal(){
-  if(priceHistory.length<SLOW_EMA+8)return {side:'',score:0,confirmed:false,mode:'building'};
+  // Start evaluating sooner; the EMA model still needs enough samples to be meaningful.
+  if(priceHistory.length<SLOW_EMA+4)return {side:'',score:0,confirmed:false,mode:'building'};
   const mids=priceHistory.map(x=>x.mid);
   const fastSeries=mids.slice(-FAST_EMA*2),slowSeries=mids.slice(-SLOW_EMA*2);
   const fast=ema(fastSeries,FAST_EMA),slow=ema(slowSeries,SLOW_EMA);
-  const fastPrev=ema(fastSeries.slice(0,-5),FAST_EMA),slowPrev=ema(slowSeries.slice(0,-5),SLOW_EMA);
+  const fastPrev=ema(fastSeries.slice(0,-4),FAST_EMA),slowPrev=ema(slowSeries.slice(0,-4),SLOW_EMA);
   const fastSlope=fast-fastPrev,slowSlope=slow-slowPrev;
   const deltas=momentumDeltas.slice(-MOMENTUM_WINDOW);
   const momentum=deltas.reduce((a,b)=>a+b,0);
   const price=mids[mids.length-1];
 
-  // Primary entry logic remains the original directional/momentum model.
   const buyScore=(fast>slow?1:0)+(fastSlope>0?1:0)+(slowSlope>0?1:0)+
     (momentum>0?1:0)+(candleSide==='BUY'?1:0)+(price>fast?1:0);
   const sellScore=(fast<slow?1:0)+(fastSlope<0?1:0)+(slowSlope<0?1:0)+
@@ -107,42 +106,36 @@ new_direction = r'''function directionSignal(){
   if(buyScore>=4&&buyScore>sellScore)rawSide='BUY';
   else if(sellScore>=4&&sellScore>buyScore)rawSide='SELL';
 
-  // Retracement never creates a new bias by itself. It can only reinforce the
-  // established displacement direction when the base model agrees (or is
-  // temporarily neutral) and price has not broken the displacement origin.
   const retrace=retracementSignal(rawSide);
   if(retrace.continuation){
-    if(directionCandidate!==retrace.side){
-      directionCandidate=retrace.side;
-      directionConfirmations=1;
-    }
+    directionCandidate=retrace.side;
+    directionConfirmations=DIRECTION_CONFIRMATIONS;
     return {side:retrace.side,score:Math.max(buyScore,sellScore),confirmed:true,mode:'retracement-continuation',impulse:retrace.impulse};
   }
 
-  // A genuine direction change must come from the primary model. A pullback
-  // against the last candle is not enough to flip the bias while the larger
-  // structure and momentum still point to the existing direction.
   if(!rawSide){
     if(directionCandidate)return {side:directionCandidate,score:0,confirmed:false,mode:'holding-bias'};
     directionConfirmations=0;
     return {side:'',score:0,confirmed:false,mode:'neutral'};
   }
 
-  if(rawSide===directionCandidate){
-    directionConfirmations++;
-  }else{
+  if(rawSide===directionCandidate)directionConfirmations++;
+  else{
     directionCandidate=rawSide;
     directionConfirmations=1;
   }
 
-  const confirmed=directionConfirmations>=DIRECTION_CONFIRMATIONS;
-  return {side:confirmed?rawSide:'',score:rawSide==='BUY'?buyScore:sellScore,confirmed,mode:'direction'};
+  // High-conviction direction (5/6 model points) executes immediately.
+  // A normal 4-point signal needs only two consecutive confirmations.
+  const score=rawSide==='BUY'?buyScore:sellScore;
+  const confirmed=score>=5||directionConfirmations>=DIRECTION_CONFIRMATIONS;
+  return {side:confirmed?rawSide:'',score,confirmed,mode:'direction'};
 }
 '''
 s = s[:start] + new_direction + s[end:]
 
 # Remove obsolete fixed retracement/displacement constants. The adaptive model
-# above derives its reference from the current market's completed candles.
+# derives its reference from the current market's completed candles.
 for name in ('LARGE_CANDLE_MULTIPLIER','MIN_LARGE_CANDLE_PIPS','RETRACEMENT_MIN',
              'RETRACEMENT_MAX','IMPULSE_LOOKBACK_CANDLES'):
     s = re.sub(rf'const {name}=[^;]+;\s*', '', s)
@@ -178,10 +171,11 @@ async function manageOnePosition(position,bid,ask){
   const profitPips=side==='BUY'?(current-entry)/pip:(entry-current)/pip;
   const m=adaptiveMomentumState(side);
 
-  // Do not tighten the dynamic SL before the +100 pip profit threshold.
-  // The original protective SL remains active below this threshold.
+  // Once a trade is well into profit, protect it dynamically while allowing
+  // strong momentum to continue. The distance is derived from current market
+  // range rather than a fixed TP.
   if(profitPips>=100){
-    const distance=Math.max(m.scale*0.5,pip);
+    const distance=Math.max(m.scale*0.35,pip);
     const desired=normalizePrice(side==='BUY'?current-distance:current+distance);
     const old=Number(position?.stopLoss);
     const improves=side==='BUY'
@@ -193,11 +187,11 @@ async function manageOnePosition(position,bid,ask){
     }
   }
 
-  // Momentum-based profit exits only become active after +100 pips.
-  // Before +100, a position is allowed to breathe and is protected only by
-  // its initial/previously established protective SL.
-  if(profitPips>=100){
-    const fading=!m.aligned || m.strength<0.5;
+  // Begin profit protection before +100 so a winning move is not allowed to
+  // travel all the way back to entry before the momentum exit activates.
+  // +100 remains the full momentum/maximise zone.
+  if(profitPips>=70){
+    const fading=!m.aligned||m.strength<0.5;
     const reversing=m.adverse&&m.accelerationAgainst&&Math.abs(m.recent)>=Math.abs(m.prior);
     if(reversing||fading){
       await closePosition(position,reversing
@@ -207,11 +201,16 @@ async function manageOnePosition(position,bid,ask){
     }
   }
 
-  // Losing positions still use the adverse-momentum protection; the +100 pip
-  // threshold applies specifically to profit-taking/fade exits.
-  if(profitPips<0&&m.adverse&&m.accelerationAgainst&&m.strength>=1){
-    await closePosition(position,`${profitPips.toFixed(0)}p — adverse momentum strengthening`);
-    return true;
+  // Keep the requested -100 pip decision boundary. Below that point, only a
+  // genuinely strengthening adverse move closes early; otherwise the trade is
+  // allowed to recover under its broker-side -200 pip protective SL.
+  if(profitPips<=-100){
+    const adverseGrowing=m.adverse&&m.accelerationAgainst&&Math.abs(m.recent)>=Math.abs(m.prior);
+    if(adverseGrowing){
+      await closePosition(position,`${profitPips.toFixed(0)}p — adverse momentum growing`);
+      return true;
+    }
+    setStatus(`DRAW ${profitPips.toFixed(0)}p ${side} — adverse momentum faded | HOLD`);
   }
   return false;
 }
@@ -233,14 +232,10 @@ async function onTick(mid,bid,ask,previous){
 
   const signal=directionSignal();
   if(!signal.side)return;
-
-  // Existing direction remains the entry bias during a retracement. Only the
-  // primary directional model can change the bias to the opposite side.
   if(positions.length&&positions.some(p=>sideOf(p)!==signal.side))return;
   await enter(signal.side,bid,ask);
 }
 '''
 s = s[:start] + new_tick + s[end:]
 
-s=s.replace("| TP ${TAKE_PROFIT_PIPS}p", "| MOMENTUM TP FROM +100p")
 p.write_text(s)
