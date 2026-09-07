@@ -12,26 +12,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Apply latest trading management
-        shell: python
-        run: |
-          from pathlib import Path
-          p=Path('web/main.js')
-          s=p.read_text()
-          s=s.replace("const INITIAL_SL_PIPS=100;\nconst TAKE_PROFIT_PIPS=200;", "const INITIAL_SL_PIPS=200;\nconst TAKE_PROFIT_PIPS=200;\nconst PROFIT_MANAGEMENT_PIPS=100;\nconst ADVERSE_MOMENTUM_PIPS=100;")
-          s=s.replace("const CANDLE_MS=300000;", "const CANDLE_MS=60000;")
-          s=s.replace("// After the whole position batch closes, wait 3 seconds before allowing a new batch.\nconst TRADE_COOLDOWN_MS=3000;\nlet lastClosureAt=0;", "// No fixed post-close cool-off: entries are governed by margin and confirmed direction.\n")
-          s=s.replace("if(previousOwnedCount>0&&positions.length===0){lastClosureAt=Date.now();setStatus('ALL POSITIONS CLOSED — 3s COOL-OFF before next batch');}", "if(previousOwnedCount>0&&positions.length===0){setStatus('ALL POSITIONS CLOSED — ready for next confirmed direction');}")
-          s=s.replace("async function closeOurs(reason){const positions=ownedPositions();if(!positions.length)return;await Promise.all(positions.map(p=>closePosition(p,reason)));lastClosureAt=Date.now();setStatus('ALL POSITIONS CLOSE REQUESTS SENT — 3s COOL-OFF');}", "async function closeOurs(reason){const positions=ownedPositions();if(!positions.length)return;await Promise.all(positions.map(p=>closePosition(p,reason)));setStatus('ALL POSITIONS CLOSE REQUESTS SENT');}")
-          old="if(entryInFlight||positions.length>=MAX_POSITIONS||!connection||!synchronized||!positionDistanceAllows(side,positions))return;if(Date.now()-lastClosureAt<TRADE_COOLDOWN_MS){const left=TRADE_COOLDOWN_MS-(Date.now()-lastClosureAt);setStatus(`COOL-OFF ${left}ms before next batch`);return;}const slots=Math.max(0,MAX_POSITIONS-positions.length);if(!slots)return;const volume=currentVolume(),reference=side==='BUY'?ask:bid,stopLoss=initialStop(side,reference);"
-          new="if(entryInFlight||positions.length>=MAX_POSITIONS||!connection||!synchronized||!positionDistanceAllows(side,positions))return;const info=connection?.terminalState?.accountInformation||{};const freeMargin=Number(info.freeMargin);if(Number.isFinite(freeMargin)&&freeMargin<=0){setStatus('ENTRY BLOCKED — insufficient free margin');return;}const slots=Math.max(0,MAX_POSITIONS-positions.length);if(!slots)return;const volume=currentVolume();const estimatedMarginPerTrade=Number(connection?.terminalState?.specification(SYMBOL)?.marginRequired)||0;const affordable=estimatedMarginPerTrade>0&&Number.isFinite(freeMargin)?Math.max(0,Math.floor(freeMargin/estimatedMarginPerTrade)):slots;const marginSlots=Math.min(slots,affordable||slots);if(!marginSlots)return;const reference=side==='BUY'?ask:bid,stopLoss=initialStop(side,reference);"
-          s=s.replace(old,new)
-          s=s.replace("for(let i=0;i<slots;i++)", "for(let i=0;i<marginSlots;i++)")
-          s=s.replace("lastEntryPrice=reference;setStatus(`OPEN BATCH ${side} ${slots} × ${volume} — SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);", "lastEntryPrice=reference;setStatus(`OPEN BATCH ${side} ${marginSlots} × ${volume} — margin-aware | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);")
-          start=s.index("async function onTick(mid,bid,ask,previous){")
-          end=s.index("function startForegroundService", start)
-          newtick="async function onTick(mid,bid,ask,previous){\n  reconcile();\n  if(Number.isNaN(previous)){setStatus('Streaming XAUUSD — building direction model');return;}\n  const positions=ownedPositions();\n  if(positions.length){\n    const heldSide=sideOf(positions[0]);\n    const pip=brokerPipSize();\n    const current=heldSide==='BUY'?bid:ask;\n    const avgEntry=positions.reduce((sum,p)=>sum+(Number(p.openPrice)||current),0)/Math.max(1,positions.length);\n    const pnlPips=heldSide==='BUY'?(current-avgEntry)/pip:(avgEntry-current)/pip;\n    const deltaSum=momentumDeltas.slice(-MOMENTUM_WINDOW).reduce((a,b)=>a+b,0);\n    const favorableMomentum=heldSide==='BUY'?deltaSum>0:deltaSum<0;\n    const adverseMomentum=heldSide==='BUY'?deltaSum<0:deltaSum>0;\n    if(pnlPips>=PROFIT_MANAGEMENT_PIPS){\n      if(favorableMomentum)setStatus(`PROFIT ${pnlPips.toFixed(0)}p — ${heldSide} momentum growing | HOLD`);\n      else{await closeOurs(`+${pnlPips.toFixed(0)}p — 1m momentum faded`);reversalCounts.clear();return;}\n    }else if(pnlPips<=-ADVERSE_MOMENTUM_PIPS){\n      if(adverseMomentum){await closeOurs(`${pnlPips.toFixed(0)}p — 1m adverse momentum growing`);reversalCounts.clear();return;}\n      else setStatus(`DRAW ${pnlPips.toFixed(0)}p — momentum may recover | HOLD`);\n    }else setStatus(`HOLDING ${positions.length}/${MAX_POSITIONS} ${heldSide} | ${pnlPips.toFixed(0)}p | SL ${INITIAL_SL_PIPS}p | TP ${TAKE_PROFIT_PIPS}p`);\n    if(positions.length>=MAX_POSITIONS)return;\n  }\n  const signal=directionSignal();\n  if(!signal.side){if(!positions.length)setStatus(`WAITING — building direction | samples ${priceHistory.length}/${SLOW_EMA+2}`);return;}\n  if(positions.length&&positions.some(p=>sideOf(p)!==signal.side))return;\n  await enter(signal.side,bid,ask);\n}\n"
-          s=s[:start]+newtick+s[end:]
-          p.write_text(s)
+        run: python3 .github/scripts/apply_profit_momentum.py
 
       - uses: actions/setup-node@v4
         with:
