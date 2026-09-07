@@ -49,7 +49,7 @@ jobs:
             echo "ERROR: Persistent release signing is not configured. Refusing to publish an APK that cannot update over the installed app."
             exit 1
           fi
-          echo "$PIPSLIFE_KEYSTORE_BASE64" | base64 --decode > pipslife-release.jks
+          echo "$PIPSLIFE_KEYSTORE_BASE64" | base64 --decode > app/pipslife-release.jks
           python3 - <<'PY'
           from pathlib import Path
           p=Path('app/build.gradle')
@@ -59,7 +59,7 @@ jobs:
           p.write_text(s)
           PY
           echo "Persistent Pips-life release signing enabled"
-          keytool -list -v -keystore pipslife-release.jks -storepass "$PIPSLIFE_KEYSTORE_PASSWORD" -alias "$PIPSLIFE_KEY_ALIAS" | grep -E 'Alias name:|SHA256:'
+          keytool -list -v -keystore app/pipslife-release.jks -storepass "$PIPSLIFE_KEYSTORE_PASSWORD" -alias "$PIPSLIFE_KEY_ALIAS" | grep -E 'Alias name:|SHA256:'
 
       - uses: actions/setup-node@v4
         with:
