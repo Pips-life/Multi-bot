@@ -26,6 +26,9 @@ jobs:
       - name: Stabilize engine status during MetaApi resynchronization
         run: python3 .github/scripts/stabilize_engine_status.py
 
+      - name: Update daily gain P/L display
+        run: python3 .github/scripts/update_daily_pnl_ui.py
+
       - name: Set monotonic release version
         run: |
           VERSION_CODE=$((100000 + GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
@@ -123,5 +126,5 @@ jobs:
           gh release create "$TAG" Pips-life-Multi-bot.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "Pips-life Multi-bot 2.10 (${VERSION_CODE})" \
-            --notes "Candle-size directional judgement, large-candle retracement entries, individual 200-pip protective SLs, dynamic momentum SL locking, and momentum-based dynamic TP exits. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}. Persistent release signing enforced. Engine status stabilized during MetaApi resynchronization." \
+            --notes "Daily gain P/L UI: amount and percentage versus day-start account balance, with floating and realized today values. Candle-size directional judgement, large-candle retracement entries, individual 200-pip protective SLs, +100-pip momentum exits, and dynamic momentum SL locking. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}. Persistent release signing enforced. Engine status stabilized during MetaApi resynchronization." \
             --latest
