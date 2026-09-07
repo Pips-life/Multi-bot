@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -83,7 +84,8 @@ public class MainActivity extends Activity {
                 Matcher asset = Pattern.compile("\\\"browser_download_url\\\"\\s*:\\s*\\\"([^\\\"]*Pips-life-Multi-bot\\.apk)\\\"").matcher(json);
                 if (!tag.find() || !asset.find()) return;
                 long remote = Long.parseLong(tag.group(1));
-                long local = getPackageManager().getPackageInfo(getPackageName(), 0).longVersionCode;
+                PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+                long local = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
                 if (remote <= local) return;
                 String apkUrl = asset.group(1).replace("\\u0026", "&");
                 runOnUiThread(() -> showUpdateDialog(remote, apkUrl));
