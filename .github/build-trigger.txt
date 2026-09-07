@@ -1,0 +1,1 @@
+Adaptive momentum update: remove restrictive fixed thresholds and use live candle/range structure.
