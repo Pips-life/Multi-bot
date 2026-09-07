@@ -5,6 +5,9 @@ on:
     branches: [ main, fixed-sl-tp-direction-20260904 ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -14,8 +17,15 @@ jobs:
       - name: Apply latest trading management
         run: python3 .github/scripts/apply_profit_momentum.py
 
-      - name: Apply individual balance-aware entries
+      - name: Apply broker-validation-safe individual entries
         run: python3 .github/scripts/fix_individual_entries.py
+
+      - name: Set monotonic release version
+        run: |
+          VERSION_CODE=$((100000 + GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
+          sed -i -E "s/versionCode [0-9]+; versionName '[^']+'/versionCode ${VERSION_CODE}; versionName '2.10'/" app/build.gradle
+          echo "VERSION_CODE=${VERSION_CODE}" >> "$GITHUB_ENV"
+          grep -o "versionCode [0-9]*; versionName '[^']*'" app/build.gradle
 
       - name: Repair release Gradle file
         run: |
@@ -59,11 +69,21 @@ jobs:
           test -f app/build/outputs/apk/release/app-release.apk
           test ! -f app/build/outputs/apk/debug/app-debug.apk
           ls -lh app/build/outputs/apk/release/app-release.apk
+          cp app/build/outputs/apk/release/app-release.apk Pips-life-Multi-bot.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: Multi-bot-trailing-dynamic-exit-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          path: Pips-life-Multi-bot.apk
           if-no-files-found: error
 
-# Broker-validation fix build trigger
+      - name: Publish latest APK release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${VERSION_CODE}"
+          gh release create "$TAG" Pips-life-Multi-bot.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Pips-life Multi-bot 2.10 (${VERSION_CODE})" \
+            --notes "Broker-validation-safe individual entries, dynamic momentum exit, and in-app updater. Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}." \
+            --latest
