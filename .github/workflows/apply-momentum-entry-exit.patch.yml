@@ -1,0 +1,93 @@
+name: Apply momentum entry-exit patch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-momentum-entry-exit.patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Patch trading logic
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('web/main.js')
+          s = p.read_text()
+
+          s = s.replace("const MIN_ENTRY_SPACING_PIPS=10;", "const MIN_ENTRY_SPACING_PIPS=3;\n\n// Before +100 pips, protect recent entries from turning into losses when momentum stalls.\nconst EARLY_EXIT_LOOKBACK_TICKS=4;\nconst EARLY_EXIT_MIN_PROFIT_PIPS=2;\nconst EARLY_EXIT_MIN_ADVERSE_PIPS=1.5;\nconst EARLY_EXIT_HOLD_SCORE=0.55;")
+
+          old = """function positionDistanceAllows(side,positions){if(!Number.isFinite(lastEntryPrice))return true;const pip=brokerPipSize();const same=[...positions].filter(p=>sideOf(p)===side).sort((a,b)=>positionTime(b)-positionTime(a))[0];const ref=Number(same?.openPrice??lastEntryPrice);return !Number.isFinite(ref)||Math.abs(lastMid-ref)/pip>=MIN_ENTRY_SPACING_PIPS;}"""
+          new = """function positionDistanceAllows(side,positions){
+           if(!Number.isFinite(lastEntryPrice))return true;
+           const pip=brokerPipSize();
+           const same=[...positions].filter(p=>sideOf(p)===side).sort((a,b)=>positionTime(b)-positionTime(a))[0];
+           const ref=Number(same?.openPrice??lastEntryPrice);
+           return !Number.isFinite(ref)||Math.abs(lastMid-ref)/pip>=MIN_ENTRY_SPACING_PIPS;
+          }"""
+          if old in s: s=s.replace(old,new)
+
+          marker = "\nclass BotListener extends SynchronizationListener{"
+          early = r'''
+
+function earlyMomentumExitSignal(position,signal,reference){
+ const side=sideOf(position),pp=profitPips(position,reference),pip=brokerPipSize();
+ if(!side||!Number.isFinite(pp)||pp>=MOMENTUM_ARM_PIPS)return false;
+ // Strong momentum in favour of the position: hold and let the +100-pip reversal logic manage it.
+ if(signal.side===side&&signal.score>=EARLY_EXIT_HOLD_SCORE&&((side==='BUY'&&signal.velocityPips>0)||(side==='SELL'&&signal.velocityPips<0)))return false;
+ const recent=priceHistory.slice(-EARLY_EXIT_LOOKBACK_TICKS).map(x=>Number(x.mid));
+ if(recent.length<EARLY_EXIT_LOOKBACK_TICKS)return false;
+ const net=(recent.at(-1)-recent[0])/pip;
+ const adverse=side==='BUY'?-net:net;
+ const directionalLoss=signal.side&&signal.side!==side;
+ const momentumStalled=signal.side===''||signal.score<EARLY_EXIT_HOLD_SCORE;
+ // Exit while still profitable (or only slightly negative) when momentum has stalled/reversed.
+ if(pp>=EARLY_EXIT_MIN_PROFIT_PIPS&&(adverse>=EARLY_EXIT_MIN_ADVERSE_PIPS||directionalLoss||momentumStalled))return true;
+ // If the latest entry has not gained and price is already moving against it, cut it before SL loss.
+ if(pp<=EARLY_EXIT_MIN_PROFIT_PIPS&&adverse>=EARLY_EXIT_MIN_ADVERSE_PIPS)return true;
+ return false;
+}
+
+async function manageEarlyMomentumExits(positions,reference){
+ for(const p of positions){
+  const id=idOf(p);if(!id)continue;
+  const signal=directionSignal();
+  if(!earlyMomentumExitSignal(p,signal,reference))continue;
+  const pp=profitPips(p,reference);
+  setStatus(`EARLY EXIT — ${sideOf(p)} momentum faded${Number.isFinite(pp)?` at ${pp>=0?'+':''}${pp.toFixed(1)} pips`:''}`);
+  try{await connection.closePosition(id);}catch(e){setStatus(`Early exit failed: ${errorText(e)}`);}
+ }
+}
+'''
+          if marker in s and 'function manageEarlyMomentumExits' not in s:
+              s=s.replace(marker, early+marker, 1)
+
+          old_tick="if(positions.length)await manageMomentumExits(positions,mid,bid,ask,Date.now());reconcile();"
+          new_tick="if(positions.length){await manageEarlyMomentumExits(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}reconcile();"
+          if old_tick not in s: raise SystemExit('onTick anchor not found')
+          s=s.replace(old_tick,new_tick,1)
+
+          p.write_text(s)
+          PY
+
+          git diff -- web/main.js
+
+      - name: Commit patched strategy and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web/main.js
+          git rm .github/workflows/apply-momentum-entry-exit.patch.yml
+          git commit -m "Tighten entries and exit fading momentum before loss"
+          git push
