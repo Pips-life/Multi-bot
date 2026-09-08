@@ -5,6 +5,9 @@ on:
     branches: [ main, fixed-sl-tp-direction-20260904 ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -76,6 +79,28 @@ jobs:
           test -x "$APK_SIGNER"
           "$APK_SIGNER" verify --verbose app/build/outputs/apk/release/app-release.apk
           unzip -l app/build/outputs/apk/release/app-release.apk | grep -q 'classes.dex'
+
+      - name: Read app version
+        id: version
+        run: |
+          VERSION_NAME="$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" app/build.gradle | head -1)"
+          VERSION_CODE="$(sed -n "s/.*versionCode \([0-9][0-9]*\).*/\1/p" app/build.gradle | head -1)"
+          test -n "$VERSION_NAME"
+          test -n "$VERSION_CODE"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Publish public release asset for updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ steps.version.outputs.version_name }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "Pips-life Multi-bot ${{ steps.version.outputs.version_name }}" \
+            --notes "Signed in-place update release. Version code ${{ steps.version.outputs.version_code }}." \
+            --latest
+          gh release upload "$TAG" app/build/outputs/apk/release/app-release.apk#Pips-life-Multi-bot.apk --clobber
+          gh release edit "$TAG" --title "Pips-life Multi-bot ${{ steps.version.outputs.version_name }}" --latest
 
       - uses: actions/upload-artifact@v4
         with:
