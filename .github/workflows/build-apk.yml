@@ -44,10 +44,10 @@ jobs:
 
       - name: Configure release signing
         env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.PIPSLIFE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.PIPSLIFE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.PIPSLIFE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.PIPSLIFE_KEY_PASSWORD }}
         run: |
           test -n "$RELEASE_KEYSTORE_BASE64"
           test -n "$RELEASE_STORE_PASSWORD"
@@ -58,9 +58,9 @@ jobs:
 
       - name: Build signed release APK
         env:
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.PIPSLIFE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.PIPSLIFE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.PIPSLIFE_KEY_PASSWORD }}
         run: |
           gradle assembleRelease --stacktrace \
             -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/release.keystore" \
