@@ -1,0 +1,35 @@
+name: One shot momentum patch
+on: push
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('web/main.js')
+          s=p.read_text()
+          s=s.replace('const MIN_ENTRY_SPACING_PIPS=10;', 'const MIN_ENTRY_SPACING_PIPS=3;\nconst EARLY_EXIT_LOOKBACK_TICKS=4;\nconst EARLY_EXIT_MIN_PROFIT_PIPS=2;\nconst EARLY_EXIT_MIN_ADVERSE_PIPS=1.5;\nconst EARLY_EXIT_HOLD_SCORE=0.55;')
+          marker='\nclass BotListener extends SynchronizationListener{'
+          fn='''\nfunction earlyMomentumExitSignal(position,signal,reference){\n const side=sideOf(position),pp=profitPips(position,reference),pip=brokerPipSize();\n if(!side||!Number.isFinite(pp)||pp>=MOMENTUM_ARM_PIPS)return false;\n if(signal.side===side&&signal.score>=EARLY_EXIT_HOLD_SCORE&&((side==='BUY'&&signal.velocityPips>0)||(side==='SELL'&&signal.velocityPips<0)))return false;\n const recent=priceHistory.slice(-EARLY_EXIT_LOOKBACK_TICKS).map(x=>Number(x.mid));\n if(recent.length<EARLY_EXIT_LOOKBACK_TICKS)return false;\n const net=(recent.at(-1)-recent[0])/pip;\n const adverse=side==='BUY'?-net:net;\n const directionalLoss=signal.side&&signal.side!==side;\n const momentumStalled=signal.side===''||signal.score<EARLY_EXIT_HOLD_SCORE;\n if(pp>=EARLY_EXIT_MIN_PROFIT_PIPS&&(adverse>=EARLY_EXIT_MIN_ADVERSE_PIPS||directionalLoss||momentumStalled))return true;\n if(pp<=EARLY_EXIT_MIN_PROFIT_PIPS&&adverse>=EARLY_EXIT_MIN_ADVERSE_PIPS)return true;\n return false;\n}\nasync function manageEarlyMomentumExits(positions,reference){\n for(const p of positions){\n  const id=idOf(p);if(!id)continue;\n  const signal=directionSignal();\n  if(!earlyMomentumExitSignal(p,signal,reference))continue;\n  const pp=profitPips(p,reference);\n  setStatus(`EARLY EXIT — ${sideOf(p)} momentum faded${Number.isFinite(pp)?` at ${pp>=0?'+':''}${pp.toFixed(1)} pips`:''}`);\n  try{await connection.closePosition(id);}catch(e){setStatus(`Early exit failed: ${errorText(e)}`);}\n }\n}\n'''
+          if 'function manageEarlyMomentumExits' not in s:
+              s=s.replace(marker,fn+marker,1)
+          old='if(positions.length)await manageMomentumExits(positions,mid,bid,ask,Date.now());reconcile();'
+          new='if(positions.length){await manageEarlyMomentumExits(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}reconcile();'
+          if old not in s: raise SystemExit('tick anchor missing')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add web/main.js
+          git rm .github/workflows/one-shot-momentum-patch.yml
+          git commit -m 'Tighten entries and add pre-loss momentum exit'
+          git push
