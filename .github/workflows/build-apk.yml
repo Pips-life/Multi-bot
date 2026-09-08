@@ -100,7 +100,11 @@ jobs:
             --notes "Signed in-place update release. Version code ${{ steps.version.outputs.version_code }}." \
             --latest
           gh release upload "$TAG" app/build/outputs/apk/release/app-release.apk#Pips-life-Multi-bot.apk --clobber
-          gh release edit "$TAG" --title "Pips-life Multi-bot ${{ steps.version.outputs.version_name }}" --latest
+          RELEASE_ID="$(gh release view "$TAG" --json databaseId --jq '.databaseId')"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -f "make_latest=true" \
+            -f "name=Pips-life Multi-bot ${{ steps.version.outputs.version_name }}" \
+            -f "body=Signed in-place update release. Version code ${{ steps.version.outputs.version_code }}."
 
       - uses: actions/upload-artifact@v4
         with:
