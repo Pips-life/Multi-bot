@@ -16,39 +16,35 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply momentum entry and pre-loss exit strategy
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Apply 100-pip growth room, break-even protection and dynamic +100 exit
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
           p=Path('web/main.js')
           s=p.read_text()
           changed=False
-          if 'const MIN_ENTRY_SPACING_PIPS=10;' in s:
-              s=s.replace('const MIN_ENTRY_SPACING_PIPS=10;', 'const MIN_ENTRY_SPACING_PIPS=3;\nconst EARLY_EXIT_LOOKBACK_TICKS=4;\nconst EARLY_EXIT_MIN_PROFIT_PIPS=2;\nconst EARLY_EXIT_MIN_ADVERSE_PIPS=1.5;\nconst EARLY_EXIT_HOLD_SCORE=0.55;')
-              changed=True
+          # Remove the overly-sensitive pre-loss exit layer.
+          s=re.sub(r"const EARLY_EXIT_LOOKBACK_TICKS=4;\nconst EARLY_EXIT_MIN_PROFIT_PIPS=2;\nconst EARLY_EXIT_MIN_ADVERSE_PIPS=1\.5;\nconst EARLY_EXIT_HOLD_SCORE=0\.55;\n", "", s)
+          s=re.sub(r"\nfunction earlyMomentumExitSignal\(.*?\n}\nasync function manageEarlyMomentumExits\(.*?\n}\n", "\n", s, flags=re.S)
+          s=s.replace("const SL_PIPS=100;\n", "const SL_PIPS=100;\nconst BREAK_EVEN_ARM_PIPS=50;\nconst BREAK_EVEN_BUFFER_PIPS=0;\n")
+          be_fn='''\nasync function manageBreakEvenProtection(positions,reference){\n const pip=brokerPipSize();\n for(const p of positions){\n  const id=idOf(p),side=sideOf(p),open=Number(p.openPrice);\n  if(!id||!side||!Number.isFinite(open))continue;\n  const pp=profitPips(p,reference);\n  if(!Number.isFinite(pp)||pp<BREAK_EVEN_ARM_PIPS)continue;\n  const target=normalizePrice(side==='BUY'?open+BREAK_EVEN_BUFFER_PIPS*pip:open-BREAK_EVEN_BUFFER_PIPS*pip);\n  const current=Number(p.stopLoss);\n  const improved=side==='BUY'?(Number.isFinite(current)&&current>0?current<target:true):(Number.isFinite(current)&&current>0?current>target:true);\n  if(!improved)continue;\n  try{\n   await connection.modifyPosition(id,target,Number(p.takeProfit)||undefined);\n   setStatus(`BREAK-EVEN — ${side} protected at entry after +${pp.toFixed(1)} pips`);\n  }catch(e){setStatus(`Break-even update failed: ${errorText(e)}`);}\n }\n}\n'''
           marker='\nclass BotListener extends SynchronizationListener{'
-          fn='''\nfunction earlyMomentumExitSignal(position,signal,reference){\n const side=sideOf(position),pp=profitPips(position,reference),pip=brokerPipSize();\n if(!side||!Number.isFinite(pp)||pp>=MOMENTUM_ARM_PIPS)return false;\n if(signal.side===side&&signal.score>=EARLY_EXIT_HOLD_SCORE&&((side==='BUY'&&signal.velocityPips>0)||(side==='SELL'&&signal.velocityPips<0)))return false;\n const recent=priceHistory.slice(-EARLY_EXIT_LOOKBACK_TICKS).map(x=>Number(x.mid));\n if(recent.length<EARLY_EXIT_LOOKBACK_TICKS)return false;\n const net=(recent.at(-1)-recent[0])/pip;\n const adverse=side==='BUY'?-net:net;\n const directionalLoss=signal.side&&signal.side!==side;\n const momentumStalled=signal.side===''||signal.score<EARLY_EXIT_HOLD_SCORE;\n if(pp>=EARLY_EXIT_MIN_PROFIT_PIPS&&(adverse>=EARLY_EXIT_MIN_ADVERSE_PIPS||directionalLoss||momentumStalled))return true;\n if(pp<=EARLY_EXIT_MIN_PROFIT_PIPS&&adverse>=EARLY_EXIT_MIN_ADVERSE_PIPS)return true;\n return false;\n}\nasync function manageEarlyMomentumExits(positions,reference){\n for(const p of positions){\n  const id=idOf(p);if(!id)continue;\n  const signal=directionSignal();\n  if(!earlyMomentumExitSignal(p,signal,reference))continue;\n  const pp=profitPips(p,reference);\n  setStatus(`EARLY EXIT — ${sideOf(p)} momentum faded${Number.isFinite(pp)?` at ${pp>=0?'+':''}${pp.toFixed(1)} pips`:''}`);\n  try{await connection.closePosition(id);}catch(e){setStatus(`Early exit failed: ${errorText(e)}`);}\n }\n}\n'''
-          if 'function manageEarlyMomentumExits' not in s:
-              s=s.replace(marker,fn+marker,1)
-              changed=True
-          old='if(positions.length)await manageMomentumExits(positions,mid,bid,ask,Date.now());reconcile();'
-          new='if(positions.length){await manageEarlyMomentumExits(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}reconcile();'
-          if old in s:
-              s=s.replace(old,new,1)
-              changed=True
+          if 'function manageBreakEvenProtection' not in s:
+              s=s.replace(marker,be_fn+marker,1)
+          # Replace any previous early-exit tick call with break-even protection only.
+          s=s.replace('if(positions.length){await manageEarlyMomentumExits(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}', 'if(positions.length){await manageBreakEvenProtection(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}')
+          s=s.replace('await manageEarlyMomentumExits(positions,mid);', 'await manageBreakEvenProtection(positions,mid);')
           p.write_text(s)
-          print('strategy patch changed:', changed)
+          print('growth-room strategy patch applied')
           PY
-
           if git diff --quiet -- web/main.js; then
             echo 'Strategy already patched; no source commit needed.'
           else
             git config user.name github-actions[bot]
             git config user.email 41898282+github-actions[bot]@users.noreply.github.com
             git add web/main.js
-            git commit -m 'Tighten entries and add pre-loss momentum exit'
+            git commit -m 'Give positions room to grow and protect at break-even'
             git push
           fi
 
