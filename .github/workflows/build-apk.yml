@@ -29,7 +29,10 @@ jobs:
       - name: Apply final per-position 100 pip opposite-stop trail
         run: python3 .github/scripts/apply_profit_momentum.py
 
-      - name: Verify final source contains opposite-stop trail
+      - name: Restore stable MetaApi streaming connection startup
+        run: python3 .github/scripts/fix_metaapi_connection.py
+
+      - name: Verify final source contains trading and connection fixes
         run: |
           grep -q "OPPOSITE_STOP_TRAIL_PIPS=100" web/main.js
           grep -q "oppositeTrailOrders" web/main.js
@@ -37,7 +40,14 @@ jobs:
           grep -q "createStopBuyOrder" web/main.js
           grep -q "createStopSellOrder" web/main.js
           grep -q "closePosition(sourceId)" web/main.js
-          echo "Verified: final opposite-stop trail source is present"
+          grep -q "getStreamingConnection()" web/main.js
+          grep -q "await localConnection.connect()" web/main.js
+          grep -q "await localConnection.waitSynchronized()" web/main.js
+          if grep -q "await account.waitConnected()" web/main.js; then
+            echo "ERROR: stale account.waitConnected() startup path remains"
+            exit 1
+          fi
+          echo "Verified: final source contains per-position opposite-stop and stable MetaApi connection startup"
 
       - name: Set monotonic release version
         run: |
@@ -132,4 +142,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="v${VERSION_CODE}"
-          gh release create "$TAG" Pips-life-Multi-bot.apk --repo "$GITHUB_REPOSITORY" --title "Pips-life Multi-bot 2.10 (${VERSION_CODE})" --notes "Final per-position 100-pip opposite-stop trailing system with immediate no-timer reversal handling. The broker-side stop creates the opposite position; the superseded position is closed immediately on confirmed stop completion. Persistent release signing enforced for in-place updates. Actual broker/network latency cannot be guaranteed at 0.1 ms." --latest
+          gh release create "$TAG" Pips-life-Multi-bot.apk --repo "$GITHUB_REPOSITORY" --title "Pips-life Multi-bot 2.10 (${VERSION_CODE})" --notes "Per-position 100-pip opposite-stop trailing system with immediate no-timer reversal handling. Restored official MetaApi streaming connection startup sequence; the superseded position is closed immediately on confirmed stop completion. Persistent release signing enforced for in-place updates. Actual broker/network latency cannot be guaranteed at 0.1 ms." --latest
