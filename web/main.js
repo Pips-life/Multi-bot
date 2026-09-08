@@ -3,6 +3,8 @@ import MetaApi, { SynchronizationListener } from 'metaapi.cloud-sdk';
 const SYMBOL='XAUUSD';
 const MAGIC=260904;
 const SL_PIPS=100;
+const BREAK_EVEN_ARM_PIPS=50;
+const BREAK_EVEN_BUFFER_PIPS=0;
 const MAX_POSITIONS=4;
 const EXECUTION_VOLUME=0.01;
 const XAUUSD_PIP_SIZE_FALLBACK=0.01;
@@ -15,10 +17,6 @@ const QUICK_MIN_NET_PIPS=1.0;
 const QUICK_MIN_VELOCITY_PIPS=0.25;
 const QUICK_MIN_ACCELERATION_PIPS=0.03;
 const MIN_ENTRY_SPACING_PIPS=3;
-const EARLY_EXIT_LOOKBACK_TICKS=4;
-const EARLY_EXIT_MIN_PROFIT_PIPS=2;
-const EARLY_EXIT_MIN_ADVERSE_PIPS=1.5;
-const EARLY_EXIT_HOLD_SCORE=0.55;
 
 // +100 pips arms same-candle momentum reversal protection; it is NOT a TP.
 const MOMENTUM_ARM_PIPS=100;
@@ -116,28 +114,22 @@ async function manageMomentumExits(positions,reference,bid,ask,now){
  }
 }
 
-function earlyMomentumExitSignal(position,signal,reference){
- const side=sideOf(position),pp=profitPips(position,reference),pip=brokerPipSize();
- if(!side||!Number.isFinite(pp)||pp>=MOMENTUM_ARM_PIPS)return false;
- if(signal.side===side&&signal.score>=EARLY_EXIT_HOLD_SCORE&&((side==='BUY'&&signal.velocityPips>0)||(side==='SELL'&&signal.velocityPips<0)))return false;
- const recent=priceHistory.slice(-EARLY_EXIT_LOOKBACK_TICKS).map(x=>Number(x.mid));
- if(recent.length<EARLY_EXIT_LOOKBACK_TICKS)return false;
- const net=(recent.at(-1)-recent[0])/pip;
- const adverse=side==='BUY'?-net:net;
- const directionalLoss=signal.side&&signal.side!==side;
- const momentumStalled=signal.side===''||signal.score<EARLY_EXIT_HOLD_SCORE;
- if(pp>=EARLY_EXIT_MIN_PROFIT_PIPS&&(adverse>=EARLY_EXIT_MIN_ADVERSE_PIPS||directionalLoss||momentumStalled))return true;
- if(pp<=EARLY_EXIT_MIN_PROFIT_PIPS&&adverse>=EARLY_EXIT_MIN_ADVERSE_PIPS)return true;
- return false;
-}
-async function manageEarlyMomentumExits(positions,reference){
+
+async function manageBreakEvenProtection(positions,reference){
+ const pip=brokerPipSize();
  for(const p of positions){
-  const id=idOf(p);if(!id)continue;
-  const signal=directionSignal();
-  if(!earlyMomentumExitSignal(p,signal,reference))continue;
+  const id=idOf(p),side=sideOf(p),open=Number(p.openPrice);
+  if(!id||!side||!Number.isFinite(open))continue;
   const pp=profitPips(p,reference);
-  setStatus(`EARLY EXIT — ${sideOf(p)} momentum faded${Number.isFinite(pp)?` at ${pp>=0?'+':''}${pp.toFixed(1)} pips`:''}`);
-  try{await connection.closePosition(id);}catch(e){setStatus(`Early exit failed: ${errorText(e)}`);}
+  if(!Number.isFinite(pp)||pp<BREAK_EVEN_ARM_PIPS)continue;
+  const target=normalizePrice(side==='BUY'?open+BREAK_EVEN_BUFFER_PIPS*pip:open-BREAK_EVEN_BUFFER_PIPS*pip);
+  const current=Number(p.stopLoss);
+  const improved=side==='BUY'?(Number.isFinite(current)&&current>0?current<target:true):(Number.isFinite(current)&&current>0?current>target:true);
+  if(!improved)continue;
+  try{
+   await connection.modifyPosition(id,target,Number(p.takeProfit)||undefined);
+   setStatus(`BREAK-EVEN — ${side} protected at entry after +${pp.toFixed(1)} pips`);
+  }catch(e){setStatus(`Break-even update failed: ${errorText(e)}`);}
  }
 }
 
@@ -159,7 +151,7 @@ function reconcile(){if(!connection?.terminalState)return;const positions=ownedP
 async function enforceProtection(position){const id=idOf(position),open=Number(position.openPrice),side=sideOf(position);if(!id||repairingPositionIds.has(id)||!Number.isFinite(open)||!side||!connection)return;const {stopLoss}=protectiveLevels(side,open);if(!Number.isFinite(stopLoss))return;repairingPositionIds.add(id);try{const actualSl=Number(position.stopLoss??0),pip=brokerPipSize();if(Math.abs(actualSl-stopLoss)>=pip/2)await connection.modifyPosition(id,stopLoss,undefined);}catch(e){setStatus(`Protection update failed: ${errorText(e)}`);}finally{repairingPositionIds.delete(id);}}
 async function enter(side,bid,ask,signal){const positions=ownedPositions();if(entryInFlight||positions.length>=MAX_POSITIONS||!connection||!synchronized||!positionDistanceAllows(side,positions))return;const volume=currentVolume(),reference=side==='BUY'?ask:bid,{stopLoss}=protectiveLevels(side,reference);if(!Number.isFinite(stopLoss))return;entryInFlight=true;try{const options=tradeOptions(side);if(side==='BUY')await connection.createMarketBuyOrder(SYMBOL,volume,stopLoss,undefined,options);else await connection.createMarketSellOrder(SYMBOL,volume,stopLoss,undefined,options);lastEntryPrice=reference;setStatus(`OPEN ${side} ${volume} — quick momentum ${Math.round(signal.score*100)}% | reversal exit armed at +${MOMENTUM_ARM_PIPS} pips`);await waitForPosition(side,5000);reconcile();}catch(e){setStatus(`Entry failed: ${errorText(e)}`);}finally{entryInFlight=false;}}
 async function waitForPosition(side,timeoutMs){const end=Date.now()+timeoutMs;while(Date.now()<end){reconcile();const p=ownedPositions().find(x=>sideOf(x)===side);if(p){lastEntryPrice=Number(p.openPrice)||lastEntryPrice;return p;}await new Promise(r=>setTimeout(r,100));}return null;}
-async function onTick(mid,bid,ask,previous){const positions=ownedPositions();if(positions.length){await manageEarlyMomentumExits(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}reconcile();if(Number.isNaN(previous)){setStatus('Streaming XAUUSD — building quick momentum model');return;}const signal=confirmedDirection();if(!signal.side){if(!ownedPositions().length)setStatus(`SCANNING — quick momentum | ${priceHistory.length}/${QUICK_LOOKBACK_TICKS} ticks`);return;}const livePositions=ownedPositions();if(livePositions.length>=MAX_POSITIONS){setStatus(`HOLDING ${livePositions.length}/${MAX_POSITIONS} ${signal.side} — momentum active | reversal exit +${MOMENTUM_ARM_PIPS}`);return;}if(livePositions.length&&livePositions.some(p=>sideOf(p)!==signal.side))return;await enter(signal.side,bid,ask,signal);}
+async function onTick(mid,bid,ask,previous){const positions=ownedPositions();if(positions.length){await manageBreakEvenProtection(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}reconcile();if(Number.isNaN(previous)){setStatus('Streaming XAUUSD — building quick momentum model');return;}const signal=confirmedDirection();if(!signal.side){if(!ownedPositions().length)setStatus(`SCANNING — quick momentum | ${priceHistory.length}/${QUICK_LOOKBACK_TICKS} ticks`);return;}const livePositions=ownedPositions();if(livePositions.length>=MAX_POSITIONS){setStatus(`HOLDING ${livePositions.length}/${MAX_POSITIONS} ${signal.side} — momentum active | reversal exit +${MOMENTUM_ARM_PIPS}`);return;}if(livePositions.length&&livePositions.some(p=>sideOf(p)!==signal.side))return;await enter(signal.side,bid,ask,signal);}
 function startForegroundService(){try{if(window.AndroidBot?.startForegroundBot)window.AndroidBot.startForegroundBot();}catch(_) {}}
 function stopForegroundService(){try{if(window.AndroidBot?.stopForegroundBot)window.AndroidBot.stopForegroundBot();}catch(_) {}}
 function bindUi(){ui.save.onclick=()=>{localStorage.setItem('metaapiToken',cleanToken(ui.token.value));localStorage.setItem('metaapiAccount',ui.account.value.trim());setStatus('Credentials saved on device');};ui.change.onclick=()=>{ui.token.value='';ui.account.value='';localStorage.removeItem('metaapiToken');localStorage.removeItem('metaapiAccount');setStatus('Credentials cleared');};ui.start.onclick=async()=>{if(trading||connecting)return;signalSide='';lastMid=NaN;priceHistory.length=0;trading=false;startForegroundService();setStatus('START BOT — connecting…');const ok=await connectSdk();if(!ok){stopForegroundService();return;}trading=true;setStatus('BOT STARTED — scanning quick XAUUSD momentum');};ui.stopBot.onclick=async()=>{trading=false;stopForegroundService();setStatus('BOT STOPPED');};ui.token.value=localStorage.getItem('metaapiToken')||'';ui.account.value=localStorage.getItem('metaapiAccount')||'';}
