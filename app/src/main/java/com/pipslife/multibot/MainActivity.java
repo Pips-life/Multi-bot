@@ -27,7 +27,7 @@ import java.net.URL;
 
 public class MainActivity extends Activity {
     private static final String RELEASE_API = "https://api.github.com/repos/Pips-life/Multi-bot/releases/latest";
-    private static final String APK_ASSET = "Pips-life-Multi-bot.apk";
+    private static final String APK_ASSET = "app-release.apk";
     private WebView webView;
 
     public class BotBridge {
