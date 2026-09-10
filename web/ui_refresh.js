@@ -21,7 +21,7 @@
     .dealer{font-size:8px}.meter{height:12px}.meter:after{height:20px;top:-4px}.dealerValue{font-size:12px;margin-top:6px}.dealerSub{font-size:8px}.sentiment{gap:7px}.ring{width:55px;height:55px}.ring:after{width:40px;height:40px}.sentiment strong{font-size:13px}.sentiment small{font-size:8px}
     .flowCard{margin-top:7px}.flowHead{padding:10px;gap:7px}.flowHead h3{font-size:15px}.flowHead p{font-size:9px;margin-top:3px}.actions{gap:5px}.entry,.aligned{padding:6px 8px;font-size:9px}
     .greeks{min-width:700px}.greeks th{font-size:8px;padding:8px 5px}.greeks td{font-size:9px;padding:7px 5px}.strike{font-size:11px}.metricState{font-size:8px;margin:2px 0 4px}.bar{height:4px}.confluence{font-size:11px}.statusbar{padding:7px 10px!important;font-size:8px!important}
-    .lower{grid-template-columns:1.05fr 1fr .78fr;gap:7px;margin-top:7px}.chart{height:112px;gap:5px;padding:7px 5px 14px}.chartCol{gap:3px}.chartCol em{font-size:7px}.chartCol i{width:19px}.logic p{font-size:9px;line-height:1.4}.plan .side{font-size:12px}.plan dl{grid-template-columns:42px 1fr;gap:5px;margin-top:8px;font-size:9px}.confidence{margin-top:9px;padding:7px;font-size:9px}
+    .lower{grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-top:7px}.chart{height:112px;gap:5px;padding:7px 5px 14px}.chartCol{gap:3px}.chartCol em{font-size:7px}.chartCol i{width:19px}.logic p{font-size:9px;line-height:1.4}.plan .side{font-size:12px}.plan dl{grid-template-columns:42px 1fr;gap:5px;margin-top:8px;font-size:9px}.confidence{margin-top:9px;padding:7px;font-size:9px}
     .realtime{margin-top:7px}.flowTable th,.flowTable td{padding:6px 6px;font-size:8px}
     .account,.updateCard{margin-top:7px}.accountGrid{gap:7px}.input{padding:9px;font-size:10px}.btn{padding:10px;font-size:10px}.notice{font-size:8px}.updateLine strong{font-size:11px}.updateState{font-size:8px}.updateBtn{padding:7px 9px;font-size:9px}
     .controls{display:none!important}
@@ -66,6 +66,11 @@
     bar.querySelectorAll('button').forEach(btn=>btn.addEventListener('click',()=>setStrategy(btn.dataset.strategy)));
   }
 
+  if(hero && !$('pipslifePageHint')){
+    const hint=document.createElement('div'); hint.id='pipslifePageHint'; hint.textContent='Home • Live trading dashboard';
+    hero.parentNode.insertBefore(hint,hero);
+  }
+
   function setStrategy(id){
     const num=String(id).padStart(3,'0');
     q('#pipslifeStrategyBar button').forEach(b=>b.classList.toggle('active',b.dataset.strategy===num));
@@ -83,11 +88,6 @@
 
   const selected=localStorage.getItem('pipslifeSelectedStrategy')||'001';
   setTimeout(()=>setStrategy(selected),0);
-
-  if(hero && !$('pipslifePageHint')){
-    const hint=document.createElement('div'); hint.id='pipslifePageHint'; hint.textContent='Home • Live trading dashboard';
-    hero.parentNode.insertBefore(hint,hero);
-  }
 
   if(!$('pipslifeActionDock')){
     const dock=document.createElement('div');dock.id='pipslifeActionDock';
