@@ -23,27 +23,25 @@ jobs:
           import re
           p=Path('web/main.js')
           s=p.read_text()
-          # Keep this compatibility patch idempotent so repeated builds never duplicate constants.
-          s=re.sub(r'(const BREAK_EVEN_ARM_PIPS=50;\n)+', 'const BREAK_EVEN_ARM_PIPS=50;\n', s)
-          s=re.sub(r'(const BREAK_EVEN_BUFFER_PIPS=0;\n)+', 'const BREAK_EVEN_BUFFER_PIPS=0;\n', s)
+          # Normalize these constants regardless of their current ordering, then insert one copy.
+          s=re.sub(r'\nconst BREAK_EVEN_ARM_PIPS=50;', '', s)
+          s=re.sub(r'\nconst BREAK_EVEN_BUFFER_PIPS=0;', '', s)
+          s=s.replace("const SL_PIPS=100;", "const SL_PIPS=100;\nconst BREAK_EVEN_ARM_PIPS=50;\nconst BREAK_EVEN_BUFFER_PIPS=0;", 1)
           # Remove the overly-sensitive pre-loss exit layer if present.
           s=re.sub(r"const EARLY_EXIT_LOOKBACK_TICKS=4;\nconst EARLY_EXIT_MIN_PROFIT_PIPS=2;\nconst EARLY_EXIT_MIN_ADVERSE_PIPS=1\.5;\nconst EARLY_EXIT_HOLD_SCORE=0\.55;\n", "", s)
           s=re.sub(r"\nfunction earlyMomentumExitSignal\(.*?\n}\nasync function manageEarlyMomentumExits\(.*?\n}\n", "\n", s, flags=re.S)
-          if 'const BREAK_EVEN_ARM_PIPS=' not in s:
-              s=s.replace("const SL_PIPS=100;\n", "const SL_PIPS=100;\nconst BREAK_EVEN_ARM_PIPS=50;\nconst BREAK_EVEN_BUFFER_PIPS=0;\n", 1)
           be_fn='''\nasync function manageBreakEvenProtection(positions,reference){\n const pip=brokerPipSize();\n for(const p of positions){\n  const id=idOf(p),side=sideOf(p),open=Number(p.openPrice);\n  if(!id||!side||!Number.isFinite(open))continue;\n  const pp=profitPips(p,reference);\n  if(!Number.isFinite(pp)||pp<BREAK_EVEN_ARM_PIPS)continue;\n  const target=normalizePrice(side==='BUY'?open+BREAK_EVEN_BUFFER_PIPS*pip:open-BREAK_EVEN_BUFFER_PIPS*pip);\n  const current=Number(p.stopLoss);\n  const improved=side==='BUY'?(Number.isFinite(current)&&current>0?current<target:true):(Number.isFinite(current)&&current>0?current>target:true);\n  if(!improved)continue;\n  try{\n   await connection.modifyPosition(id,target,Number(p.takeProfit)||undefined);\n   setStatus(`BREAK-EVEN — ${side} protected at entry after +${pp.toFixed(1)} pips`);\n  }catch(e){setStatus(`Break-even update failed: ${errorText(e)}`);}\n }\n}\n'''
           marker='\nclass BotListener extends SynchronizationListener{'
           if 'function manageBreakEvenProtection' not in s:
               s=s.replace(marker,be_fn+marker,1)
           s=s.replace('if(positions.length){await manageEarlyMomentumExits(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}', 'if(positions.length){await manageBreakEvenProtection(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}')
           s=s.replace('await manageEarlyMomentumExits(positions,mid);', 'await manageBreakEvenProtection(positions,mid);')
-          # UI-only DOM compatibility: current dashboard uses the stop button as the legacy
-          # SL display binding, and the legacy engine also expects balance/position nodes.
-          if 'document.getElementById(\'balance\')' not in s:
+          # UI-only DOM compatibility for the existing engine bindings.
+          if "document.getElementById('balance')" not in s:
               dom_compat="""\nif(!document.getElementById('balance')){const e=document.createElement('span');e.id='balance';e.style.display='none';document.body.appendChild(e);}\nif(!document.getElementById('position')){const e=document.createElement('span');e.id='position';e.style.display='none';document.body.appendChild(e);}\n"""
               s=s.replace("const ui={", dom_compat+"const ui={", 1)
           p.write_text(s)
-          # Preserve the visual STOP BOT label while the legacy UI binding stores SL in #stop.
+          # Preserve the visual STOP BOT label while the legacy binding stores the SL value in #stop.
           h=Path('web/index.html')
           html=h.read_text()
           if '#stop{font-size:0}' not in html:
