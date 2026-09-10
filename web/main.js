@@ -29,6 +29,9 @@ const REVERSAL_MIN_ADVERSE_PIPS=2.5;
 const REVERSAL_MIN_PEAK_RETRACE_PIPS=4;
 
 const $=id=>document.getElementById(id);
+
+if(!document.getElementById('balance')){const e=document.createElement('span');e.id='balance';e.style.display='none';document.body.appendChild(e);}
+if(!document.getElementById('position')){const e=document.createElement('span');e.id='position';e.style.display='none';document.body.appendChild(e);}
 const ui={token:$('token'),account:$('account'),price:$('price'),balance:$('balance'),position:$('position'),stop:$('stop'),status:$('status'),save:$('save'),change:$('change'),start:$('start'),stopBot:$('stop')};
 let api=null,account=null,connection=null,listener=null;
 let trading=false,connecting=false,synchronized=false;
