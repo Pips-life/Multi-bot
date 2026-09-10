@@ -23,20 +23,22 @@ jobs:
           import re
           p=Path('web/main.js')
           s=p.read_text()
-          changed=False
-          # Remove the overly-sensitive pre-loss exit layer.
+          # Keep this compatibility patch idempotent so repeated builds never duplicate constants.
+          s=re.sub(r'(const BREAK_EVEN_ARM_PIPS=50;\n)+', 'const BREAK_EVEN_ARM_PIPS=50;\n', s)
+          s=re.sub(r'(const BREAK_EVEN_BUFFER_PIPS=0;\n)+', 'const BREAK_EVEN_BUFFER_PIPS=0;\n', s)
+          # Remove the overly-sensitive pre-loss exit layer if present.
           s=re.sub(r"const EARLY_EXIT_LOOKBACK_TICKS=4;\nconst EARLY_EXIT_MIN_PROFIT_PIPS=2;\nconst EARLY_EXIT_MIN_ADVERSE_PIPS=1\.5;\nconst EARLY_EXIT_HOLD_SCORE=0\.55;\n", "", s)
           s=re.sub(r"\nfunction earlyMomentumExitSignal\(.*?\n}\nasync function manageEarlyMomentumExits\(.*?\n}\n", "\n", s, flags=re.S)
-          s=s.replace("const SL_PIPS=100;\n", "const SL_PIPS=100;\nconst BREAK_EVEN_ARM_PIPS=50;\nconst BREAK_EVEN_BUFFER_PIPS=0;\n")
+          if 'const BREAK_EVEN_ARM_PIPS=' not in s:
+              s=s.replace("const SL_PIPS=100;\n", "const SL_PIPS=100;\nconst BREAK_EVEN_ARM_PIPS=50;\nconst BREAK_EVEN_BUFFER_PIPS=0;\n", 1)
           be_fn='''\nasync function manageBreakEvenProtection(positions,reference){\n const pip=brokerPipSize();\n for(const p of positions){\n  const id=idOf(p),side=sideOf(p),open=Number(p.openPrice);\n  if(!id||!side||!Number.isFinite(open))continue;\n  const pp=profitPips(p,reference);\n  if(!Number.isFinite(pp)||pp<BREAK_EVEN_ARM_PIPS)continue;\n  const target=normalizePrice(side==='BUY'?open+BREAK_EVEN_BUFFER_PIPS*pip:open-BREAK_EVEN_BUFFER_PIPS*pip);\n  const current=Number(p.stopLoss);\n  const improved=side==='BUY'?(Number.isFinite(current)&&current>0?current<target:true):(Number.isFinite(current)&&current>0?current>target:true);\n  if(!improved)continue;\n  try{\n   await connection.modifyPosition(id,target,Number(p.takeProfit)||undefined);\n   setStatus(`BREAK-EVEN — ${side} protected at entry after +${pp.toFixed(1)} pips`);\n  }catch(e){setStatus(`Break-even update failed: ${errorText(e)}`);}\n }\n}\n'''
           marker='\nclass BotListener extends SynchronizationListener{'
           if 'function manageBreakEvenProtection' not in s:
               s=s.replace(marker,be_fn+marker,1)
-          # Replace any previous early-exit tick call with break-even protection only.
           s=s.replace('if(positions.length){await manageEarlyMomentumExits(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}', 'if(positions.length){await manageBreakEvenProtection(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}')
           s=s.replace('await manageEarlyMomentumExits(positions,mid);', 'await manageBreakEvenProtection(positions,mid);')
           p.write_text(s)
-          print('growth-room strategy patch applied')
+          print('idempotent growth-room strategy patch applied')
           PY
           if git diff --quiet -- web/main.js; then
             echo 'Strategy already patched; no source commit needed.'
@@ -44,7 +46,7 @@ jobs:
             git config user.name github-actions[bot]
             git config user.email 41898282+github-actions[bot]@users.noreply.github.com
             git add web/main.js
-            git commit -m 'Give positions room to grow and protect at break-even'
+            git commit -m 'Keep growth-room build patch idempotent'
             git push
           fi
 
