@@ -2,7 +2,7 @@ const path = require('path');
 const webpack = require('webpack');
 
 module.exports = {
-  entry: './web/main.js',
+  entry: ['./web/main.js', './web/ui_refresh.js'],
   output: {
     path: path.resolve(__dirname, 'web-dist'),
     filename: 'bundle.js',
