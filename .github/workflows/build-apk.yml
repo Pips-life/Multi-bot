@@ -37,16 +37,27 @@ jobs:
               s=s.replace(marker,be_fn+marker,1)
           s=s.replace('if(positions.length){await manageEarlyMomentumExits(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}', 'if(positions.length){await manageBreakEvenProtection(positions,mid);await manageMomentumExits(positions,mid,bid,ask,Date.now());}')
           s=s.replace('await manageEarlyMomentumExits(positions,mid);', 'await manageBreakEvenProtection(positions,mid);')
+          # UI-only DOM compatibility: current dashboard uses the stop button as the legacy
+          # SL display binding, and the legacy engine also expects balance/position nodes.
+          if 'document.getElementById(\'balance\')' not in s:
+              dom_compat="""\nif(!document.getElementById('balance')){const e=document.createElement('span');e.id='balance';e.style.display='none';document.body.appendChild(e);}\nif(!document.getElementById('position')){const e=document.createElement('span');e.id='position';e.style.display='none';document.body.appendChild(e);}\n"""
+              s=s.replace("const ui={", dom_compat+"const ui={", 1)
           p.write_text(s)
-          print('idempotent growth-room strategy patch applied')
+          # Preserve the visual STOP BOT label while the legacy UI binding stores SL in #stop.
+          h=Path('web/index.html')
+          html=h.read_text()
+          if '#stop{font-size:0}' not in html:
+              html=html.replace('</style>', '#stop{font-size:0}#stop::after{content:"■ STOP BOT";font-size:12px}</style>',1)
+              h.write_text(html)
+          print('idempotent build compatibility patch applied')
           PY
-          if git diff --quiet -- web/main.js; then
-            echo 'Strategy already patched; no source commit needed.'
+          if git diff --quiet -- web/main.js web/index.html; then
+            echo 'Compatibility patch already applied; no source commit needed.'
           else
             git config user.name github-actions[bot]
             git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-            git add web/main.js
-            git commit -m 'Keep growth-room build patch idempotent'
+            git add web/main.js web/index.html
+            git commit -m 'Keep release build UI bindings stable'
             git push
           fi
 
