@@ -1,4 +1,6 @@
 import MetaApi, { SynchronizationListener } from 'metaapi.cloud-sdk';
+import './ui_refresh.js';
+import './flashalpha.js';
 
 const SYMBOL='XAUUSD';
 const MAGIC=260904;
